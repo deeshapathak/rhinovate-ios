@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="19455" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="BYZ-38-t0r">
+    <device id="retina6_1" orientation="portrait" appearance="light"/>
+    <dependencies>
+        <deployment identifier="iOS"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="19454"/>
+        <capability name="Safe area layout guides" minToolsVersion="9.0"/>
+        <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+    </dependencies>
+    <scenes>
+        <!--Camera View Controller-->
+        <scene sceneID="tne-QT-ifu">
+            <objects>
+                <viewController id="BYZ-38-t0r" customClass="CameraViewController" customModule="Rhinovate" customModuleProvider="target" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="Eqv-7y-uCz" userLabel="View">
+                        <rect key="frame" x="0.0" y="0.0" width="414" height="896"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <subviews>
+                            <view contentMode="scaleToFill" translatesAutoresizingMaskIntoConstraints="NO" id="Qzi-3c-VQI" userLabel="Point Cloud" customClass="PointCloudMetalView">
+                                <rect key="frame" x="0.0" y="44" width="414" height="808"/>
+                                <color key="backgroundColor" red="0.0" green="0.0" blue="0.0" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                            </view>
+                            <button opaque="NO" contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="system" translatesAutoresizingMaskIntoConstraints="NO" id="5Ui-7Y-UdD" userLabel="Capture PLY">
+                                <rect key="frame" x="156" y="816" width="102" height="36"/>
+                                <state key="normal" title="Capture PLY"/>
+                                <connections>
+                                    <action selector="capturePLY:" destination="BYZ-38-t0r" eventType="touchUpInside" id="Qbp-1Q-KBa"/>
+                                </connections>
+                            </button>
+                            <label hidden="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="TrueDepth Camera Unavailable" textAlignment="center" lineBreakMode="tailTruncation" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="B08-Wv-b5R" userLabel="Camera Unavailable">
+                                <rect key="frame" x="46.5" y="433.5" width="321" height="29"/>
+                                <color key="backgroundColor" red="0.0" green="0.0" blue="0.0" alpha="0.0" colorSpace="custom" customColorSpace="sRGB"/>
+                                <color key="tintColor" red="1" green="1" blue="0.0" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                <fontDescription key="fontDescription" type="system" pointSize="24"/>
+                                <color key="textColor" red="1" green="1" blue="0.0" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                <nil key="highlightedColor"/>
+                            </label>
+                            <button hidden="YES" opaque="NO" contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="system" lineBreakMode="middleTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="6D4-Y8-I1S" userLabel="Resume">
+                                <rect key="frame" x="124.5" y="428.5" width="165" height="39"/>
+                                <color key="backgroundColor" red="0.0" green="0.0" blue="0.0" alpha="0.29999999999999999" colorSpace="custom" customColorSpace="sRGB"/>
+                                <fontDescription key="fontDescription" type="system" pointSize="24"/>
+                                <inset key="contentEdgeInsets" minX="10" minY="5" maxX="10" maxY="5"/>
+                                <state key="normal" title="Tap to resume">
+                                    <color key="titleShadowColor" red="0.5" green="0.5" blue="0.5" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                </state>
+                                <userDefinedRuntimeAttributes>
+                                    <userDefinedRuntimeAttribute type="number" keyPath="layer.cornerRadius">
+                                        <integer key="value" value="4"/>
+                                    </userDefinedRuntimeAttribute>
+                                </userDefinedRuntimeAttributes>
+                                <connections>
+                                    <action selector="resumeInterruptedSession:" destination="BYZ-38-t0r" eventType="touchUpInside" id="9ZM-QH-ZlN"/>
+                                </connections>
+                            </button>
+                        </subviews>
+                        <viewLayoutGuide key="safeArea" id="3Gl-sb-vLR"/>
+                        <color key="backgroundColor" red="0.0" green="0.0" blue="0.0" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <constraints>
+                            <constraint firstItem="Qzi-3c-VQI" firstAttribute="top" secondItem="3Gl-sb-vLR" secondAttribute="top" id="DWr-lr-GiM"/>
+                            <constraint firstItem="Qzi-3c-VQI" firstAttribute="leading" secondItem="3Gl-sb-vLR" secondAttribute="leading" id="Eky-5R-54Y"/>
+                            <constraint firstItem="3Gl-sb-vLR" firstAttribute="trailing" secondItem="Qzi-3c-VQI" secondAttribute="trailing" id="GFw-eY-YYN"/>
+                            <constraint firstItem="3Gl-sb-vLR" firstAttribute="bottom" secondItem="Qzi-3c-VQI" secondAttribute="bottom" id="o0U-3c-6PL"/>
+                            <constraint firstItem="5Ui-7Y-UdD" firstAttribute="centerX" secondItem="3Gl-sb-vLR" secondAttribute="centerX" id="n1X-Vg-PMy"/>
+                            <constraint firstItem="3Gl-sb-vLR" firstAttribute="bottom" secondItem="5Ui-7Y-UdD" secondAttribute="bottom" constant="-20" id="Ots-cq-TWc"/>
+                            <constraint firstItem="B08-Wv-b5R" firstAttribute="centerX" secondItem="3Gl-sb-vLR" secondAttribute="centerX" id="9qb-K5-MI3"/>
+                            <constraint firstItem="B08-Wv-b5R" firstAttribute="centerY" secondItem="Eqv-7y-uCz" secondAttribute="centerY" id="usf-3D-Qpy"/>
+                            <constraint firstItem="6D4-Y8-I1S" firstAttribute="centerX" secondItem="3Gl-sb-vLR" secondAttribute="centerX" id="jcz-lJ-VxY"/>
+                            <constraint firstItem="6D4-Y8-I1S" firstAttribute="centerY" secondItem="Eqv-7y-uCz" secondAttribute="centerY" id="0cF-Ck-xhe"/>
+                        </constraints>
+                    </view>
+                    <connections>
+                        <outlet property="cameraUnavailableLabel" destination="B08-Wv-b5R" id="zOh-RF-43A"/>
+                        <outlet property="captureButton" destination="5Ui-7Y-UdD" id="r4W-v1-4PP"/>
+                        <outlet property="cloudView" destination="Qzi-3c-VQI" id="4GD-1c-K9J"/>
+                        <outlet property="resumeButton" destination="6D4-Y8-I1S" id="xYq-f7-4cQ"/>
+                    </connections>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="dkx-z0-nzr" sceneMemberID="firstResponder"/>
+            </objects>
+            <point key="canvasLocation" x="-259.4202898550725" y="102.45535714285714"/>
+        </scene>
+    </scenes>
+    <color key="tintColor" red="1" green="1" blue="0.0" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+</document>

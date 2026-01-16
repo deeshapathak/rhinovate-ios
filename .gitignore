@@ -1,0 +1,19 @@
+## Xcode
+DerivedData/
+build/
+*.xcuserstate
+*.xcuserdata/
+*.xcuserdatad/
+*.xccheckout
+*.xcscmblueprint
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+## macOS
+.DS_Store
+
+## Local reference repo
+iOS3DFaceRecon/
