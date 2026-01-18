@@ -8,6 +8,97 @@ Contains view controller code for previewing live-captured content.
 import UIKit
 import AVFoundation
 import CoreVideo
+import MobileCoreServices
+import Accelerate
+import Photos  // luozc
+
+private enum SessionSetupResult: Sendable {
+    case success
+    case notAuthorized
+    case configurationFailed
+}
+
+private struct ScanResponse: Sendable {
+    let scanId: String
+    let glbUrl: String
+}
+
+// lzchao
+// luozc: called in func wrapEstimateImageData()
+func convertLensDistortionLookupTable(lookupTable: Data) -> [Float] {
+    let tableLength = lookupTable.count / MemoryLayout<Float>.size
+    var floatArray: [Float] = Array(repeating: 0, count: tableLength)
+    _ = floatArray.withUnsafeMutableBytes{lookupTable.copyBytes(to: $0)}
+    return floatArray
+}
+
+// luozc: called in func wrapEstimateImageData()
+@available(iOS 14.0, *)
+func convertDepthData(depthMap: CVPixelBuffer) -> [[Float]] {
+    let width = CVPixelBufferGetWidth(depthMap)
+    let height = CVPixelBufferGetHeight(depthMap)
+    var convertedDepthMap: [[Float]] = Array(
+        repeating: Array(repeating: 0, count: width),
+        count: height
+    )
+    CVPixelBufferLockBaseAddress(depthMap, CVPixelBufferLockFlags(rawValue: 2))
+    let floatBuffer = unsafeBitCast(
+        CVPixelBufferGetBaseAddress(depthMap),
+        to: UnsafeMutablePointer<Float>.self
+    )
+    for row in 0 ..< height {
+        for col in 0 ..< width {
+            convertedDepthMap[row][col] = Float(floatBuffer[width * row + col])
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(depthMap, CVPixelBufferLockFlags(rawValue: 2))
+    return convertedDepthMap
+}
+
+@available(iOS 14.0, *)
+func wrapEstimateImageData(
+    depthMap: CVPixelBuffer,
+    calibration: AVCameraCalibrationData?
+) -> Data {
+    var jsonDict: [String : Any]
+    if let cali = calibration {
+        jsonDict = [
+            "calibration_data" : [
+                "intrinsic_matrix" : (0 ..< 3).map{ x in
+                    (0 ..< 3).map{ y in cali.intrinsicMatrix[x][y]}
+                },
+                "pixel_size" : cali.pixelSize,
+                "intrinsic_matrix_reference_dimensions" : [
+                    cali.intrinsicMatrixReferenceDimensions.width,
+                    cali.intrinsicMatrixReferenceDimensions.height
+                ],
+                "lens_distortion_center" : [
+                    cali.lensDistortionCenter.x,
+                    cali.lensDistortionCenter.y
+                ],
+                "lens_distortion_lookup_table" : convertLensDistortionLookupTable(
+                    lookupTable: cali.lensDistortionLookupTable!
+                ),
+                "inverse_lens_distortion_lookup_table" : convertLensDistortionLookupTable(
+                    lookupTable: cali.inverseLensDistortionLookupTable!
+                )
+            ],
+            "depth_data" : convertDepthData(depthMap: depthMap)
+        ]
+    } else {
+        jsonDict = [
+            "depth_data" : convertDepthData(depthMap: depthMap)
+        ]
+    }
+    
+    let jsonStringData = try! JSONSerialization.data(
+        withJSONObject: jsonDict,
+        options: .prettyPrinted
+    )
+    
+    return jsonStringData
+}
+//lzchao
 
 @available(iOS 11.1, *)
 class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDelegate {
@@ -18,12 +109,31 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     
     @IBOutlet weak private var cameraUnavailableLabel: UILabel!
     
-    @IBOutlet weak private var captureButton: UIButton!
+    @IBOutlet weak private var jetView: PreviewMetalView!
     
-    private enum SessionSetupResult {
-        case success
-        case notAuthorized
-        case configurationFailed
+    @IBOutlet weak private var depthSmoothingSwitch: UISwitch!
+    
+    @IBOutlet weak private var mixFactorSlider: UISlider!
+    
+    @IBOutlet weak private var touchDepth: UILabel!
+    
+    @IBOutlet weak var autoPanningSwitch: UISwitch!
+    
+    @IBOutlet weak var autoSavingSwitch: UISwitch!
+    
+    
+    private enum UploadError: LocalizedError {
+        case invalidResponse
+        case serverError(String)
+        
+        var errorDescription: String? {
+            switch self {
+            case .invalidResponse:
+                return "Invalid server response."
+            case .serverError(let message):
+                return message
+            }
+        }
     }
     
     private var setupResult: SessionSetupResult = .success
@@ -43,19 +153,36 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private let depthDataOutput = AVCaptureDepthDataOutput()
     private var outputSynchronizer: AVCaptureDataOutputSynchronizer?
     
-    private var renderingEnabled = true
-    
-    private let latestFrameQueue = DispatchQueue(label: "latest frame queue",
-                                                 attributes: [],
-                                                 autoreleaseFrequency: .workItem)
+    private let latestFrameQueue = DispatchQueue(label: "latest frame queue", attributes: [], autoreleaseFrequency: .workItem)
     private var latestDepthData: AVDepthData?
     private var latestColorBuffer: CVPixelBuffer?
+    
+    private var captureButton: UIButton?
+    
+    private var renderingEnabled = true
+    
+    private var savingEnabled = false  // luozc
+    
+    lazy var context = CIContext()  //luozc
+    
+    private var videoData: Data?  // luozc
+    private let photoDepthConverter = DepthToUintConverter() // lzchao
     
     private let videoDeviceDiscoverySession = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInTrueDepthCamera],
                                                                                mediaType: .video,
                                                                                position: .front)
     
+    
+    
+    private var touchDetected = false
+    
+    private var touchCoordinates = CGPoint(x: 0, y: 0)
+    
     @IBOutlet weak private var cloudView: PointCloudMetalView!
+    
+    @IBOutlet weak private var cloudToJETSegCtrl: UISegmentedControl!
+    
+    @IBOutlet weak private var smoothDepthLabel: UILabel!
     
     private var lastScale = Float(1.0)
     
@@ -65,8 +192,11 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     
     private var lastXY = CGPoint(x: 0, y: 0)
     
+    private var JETEnabled = true
+    
     private var viewFrameSize = CGSize()
     
+    private var autoPanningIndex = Int(0) // start with auto-panning on
     
     // MARK: - View Controller Life Cycle
     
@@ -74,6 +204,14 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         super.viewDidLoad()
         
         viewFrameSize = self.view.frame.size
+        
+        let tapGestureJET = UITapGestureRecognizer(target: self, action: #selector(focusAndExposeTap))
+        jetView.addGestureRecognizer(tapGestureJET)
+        
+        let pressGestureJET = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPressJET))
+        pressGestureJET.minimumPressDuration = 0.05
+        pressGestureJET.cancelsTouchesInView = false
+        jetView.addGestureRecognizer(pressGestureJET)
         
         let pinchGesture = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch))
         cloudView.addGestureRecognizer(pinchGesture)
@@ -91,7 +229,19 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         panOneFingerGesture.minimumNumberOfTouches = 1
         cloudView.addGestureRecognizer(panOneFingerGesture)
         
-        captureButton.setTitle("Capture PLY", for: .normal)
+        setupCaptureButton()
+        
+        JETEnabled = false
+        cloudToJETSegCtrl.selectedSegmentIndex = 1
+        cloudToJETSegCtrl.isHidden = true
+        jetView.isHidden = true
+        depthSmoothingSwitch.isHidden = true
+        mixFactorSlider.isHidden = true
+        touchDepth.isHidden = true
+        smoothDepthLabel.isHidden = true
+        autoSavingSwitch.isHidden = true
+        autoPanningSwitch.isHidden = true
+        autoPanningIndex = -1
         
         // Check video authorization status, video access is required
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -107,7 +257,9 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             sessionQueue.suspend()
             AVCaptureDevice.requestAccess(for: .video, completionHandler: { granted in
                 if !granted {
-                    self.setupResult = .notAuthorized
+                    DispatchQueue.main.async {
+                        self.setupResult = .notAuthorized
+                    }
                 }
                 self.sessionQueue.resume()
             })
@@ -131,20 +283,196 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             self.configureSession()
         }
     }
+
+    private func setupCaptureButton() {
+        if captureButton != nil {
+            return
+        }
+
+        let button = UIButton(type: .system)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        if #available(iOS 15.0, *) {
+            var configuration = UIButton.Configuration.filled()
+            configuration.title = "Capture PLY"
+            configuration.baseBackgroundColor = .systemBlue
+            configuration.baseForegroundColor = .white
+            configuration.cornerStyle = .medium
+            configuration.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16)
+            button.configuration = configuration
+        } else {
+            button.setTitle("Capture PLY", for: .normal)
+            button.setTitleColor(.white, for: .normal)
+            button.backgroundColor = UIColor.systemBlue
+            button.layer.cornerRadius = 10
+            button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+        }
+        button.addTarget(self, action: #selector(capturePLY), for: .touchUpInside)
+
+        view.addSubview(button)
+        NSLayoutConstraint.activate([
+            button.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            button.widthAnchor.constraint(equalToConstant: 200),
+            button.heightAnchor.constraint(equalToConstant: 56)
+        ])
+        let centerYConstraint = NSLayoutConstraint(item: button,
+                                                   attribute: .centerY,
+                                                   relatedBy: .equal,
+                                                   toItem: view,
+                                                   attribute: .bottom,
+                                                   multiplier: 0.75,
+                                                   constant: 0)
+        centerYConstraint.isActive = true
+
+        captureButton = button
+        view.bringSubviewToFront(button)
+    }
+
+    @objc private func capturePLY(_ sender: UIButton) {
+        setCaptureButton(title: "Hold still...", isEnabled: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            self.performCapture()
+        }
+    }
+
+    private func performCapture() {
+        var depthData: AVDepthData?
+        var colorBuffer: CVPixelBuffer?
+        latestFrameQueue.sync {
+            depthData = latestDepthData
+            colorBuffer = latestColorBuffer
+        }
+
+        guard let depthData, let colorBuffer else {
+            setCaptureButton(title: "Capture PLY", isEnabled: true)
+            presentSimpleAlert(title: "Rhinovate", message: "No depth frame available yet.")
+            return
+        }
+
+        setCaptureButton(title: "Preparing...", isEnabled: false)
+        processingQueue.async {
+            guard let plyData = self.buildPLY(depthData: depthData,
+                                              colorBuffer: colorBuffer,
+                                              strideStep: 4) else {
+                DispatchQueue.main.async {
+                    self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                    self.presentSimpleAlert(title: "Rhinovate", message: "Unable to generate PLY data. Try better lighting and hold still.")
+                }
+                return
+            }
+
+            self.setCaptureButton(title: "Uploading...", isEnabled: false)
+            self.uploadPLY(data: plyData) { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let scanId):
+                        self.setCaptureButton(title: "Processing...", isEnabled: false)
+                        self.pollScanStatus(scanId: scanId) { statusResult in
+                            DispatchQueue.main.async {
+                                self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                                switch statusResult {
+                                case .success:
+                                    self.presentSimpleAlert(title: "Scan Ready",
+                                                            message: "Opening web app with scan.")
+                                    self.openFrontend(scanId: scanId)
+                                case .failure(let error):
+                                    self.presentSimpleAlert(title: "Scan Failed",
+                                                            message: error.localizedDescription)
+                                }
+                            }
+                        }
+                    case .failure(let error):
+                        self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                        let _ = self.savePLY(data: plyData)
+                        self.presentSimpleAlert(title: "Upload Failed",
+                                                message: "Saved PLY locally. Error: \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func setCaptureButton(title: String, isEnabled: Bool) {
+        DispatchQueue.main.async {
+            if #available(iOS 15.0, *) {
+                var configuration = self.captureButton?.configuration ?? UIButton.Configuration.filled()
+                configuration.title = title
+                self.captureButton?.configuration = configuration
+            } else {
+                self.captureButton?.setTitle(title, for: .normal)
+            }
+            self.captureButton?.isEnabled = isEnabled
+        }
+    }
+
+    private func currentInterfaceOrientation() -> UIInterfaceOrientation {
+        if let scene = view.window?.windowScene {
+            if #available(iOS 26.0, *) {
+                return scene.effectiveGeometry.interfaceOrientation
+            }
+            return scene.interfaceOrientation
+        }
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+            if #available(iOS 26.0, *) {
+                return scene.effectiveGeometry.interfaceOrientation
+            }
+            return scene.interfaceOrientation
+        }
+        return .portrait
+    }
+
+    private func previewRotation(interfaceOrientation: UIInterfaceOrientation,
+                                 cameraPosition: AVCaptureDevice.Position) -> PreviewMetalView.Rotation {
+        switch interfaceOrientation {
+        case .portrait:
+            return .rotate0Degrees
+        case .portraitUpsideDown:
+            return .rotate180Degrees
+        case .landscapeLeft:
+            return cameraPosition == .front ? .rotate270Degrees : .rotate90Degrees
+        case .landscapeRight:
+            return cameraPosition == .front ? .rotate90Degrees : .rotate270Degrees
+        default:
+            return .rotate0Degrees
+        }
+    }
+
+    private func readSetupResult() -> SessionSetupResult {
+        if Thread.isMainThread {
+            return setupResult
+        }
+        var result: SessionSetupResult = .success
+        DispatchQueue.main.sync {
+            result = self.setupResult
+        }
+        return result
+    }
+
+    private func setSetupResult(_ result: SessionSetupResult) {
+        DispatchQueue.main.async {
+            self.setupResult = result
+        }
+    }
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        
+        let interfaceOrientation = currentInterfaceOrientation()
         
         let initialThermalState = ProcessInfo.processInfo.thermalState
         if initialThermalState == .serious || initialThermalState == .critical {
             showThermalState(state: initialThermalState)
         }
         
+        let currentSetupResult = setupResult
         sessionQueue.async {
-            switch self.setupResult {
+            switch currentSetupResult {
             case .success:
                 // Only setup observers and start the session running if setup succeeded
                 self.addObservers()
+                let videoDevicePosition = self.videoDeviceInput.device.position
+                self.jetView.mirroring = (videoDevicePosition == .front)
+                self.jetView.rotation = self.previewRotation(interfaceOrientation: interfaceOrientation,
+                                                             cameraPosition: videoDevicePosition)
                 self.dataOutputQueue.async {
                     self.renderingEnabled = true
                 }
@@ -187,9 +515,9 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         dataOutputQueue.async {
             self.renderingEnabled = false
         }
-        let shouldStopSession = (setupResult == .success)
+        let currentSetupResult = setupResult
         sessionQueue.async {
-            if shouldStopSession {
+            if currentSetupResult == .success {
                 self.session.stopRunning()
                 self.isSessionRunning = self.session.isRunning
             }
@@ -203,6 +531,14 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         // Free up resources
         dataOutputQueue.async {
             self.renderingEnabled = false
+            //            if let videoFilter = self.videoFilter {
+            //                videoFilter.reset()
+            //            }
+            self.jetView.pixelBuffer = nil
+            self.jetView.flushTextureCache()
+        }
+        processingQueue.async {
+            self.photoDepthConverter.reset()
         }
     }
     
@@ -235,7 +571,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             }
             
             let message = NSLocalizedString("Thermal state: \(thermalStateString)", comment: "Alert message when thermal state has changed")
-            let alertController = UIAlertController(title: "Rhinovate", message: message, preferredStyle: .alert)
+            let alertController = UIAlertController(title: "TrueDepthStreamer", message: message, preferredStyle: .alert)
             alertController.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: "Alert OK button"), style: .cancel, handler: nil))
             self.present(alertController, animated: true, completion: nil)
         }
@@ -244,7 +580,26 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         return .all
     }
     
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        
+        coordinator.animate(alongsideTransition: { _ in
+                let interfaceOrientation = self.currentInterfaceOrientation()
+                self.sessionQueue.async {
+                    /*
+                     The photo orientation is based on the interface orientation. You could also set the orientation of the photo connection based
+                     on the device orientation by observing UIDeviceOrientationDidChangeNotification.
+                     */
+                    self.jetView.rotation = self.previewRotation(interfaceOrientation: interfaceOrientation,
+                                                                 cameraPosition: self.videoDeviceInput.device.position)
+                }
+        }, completion: nil)
+    }
+    
     // MARK: - KVO and Notifications
+    
+    private var sessionRunningContext = 0
+    
     private func addObservers() {
         NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
                                                name: UIApplication.didEnterBackgroundNotification, object: nil)
@@ -275,16 +630,14 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     
     deinit {
         NotificationCenter.default.removeObserver(self)
-        latestFrameQueue.sync {
-            latestColorBuffer = nil
-        }
     }
     
     // MARK: - Session Management
     
     // Call this on the session queue
     private func configureSession() {
-        if setupResult != .success {
+        let currentSetupResult = readSetupResult()
+        if currentSetupResult != .success {
             return
         }
         
@@ -292,7 +645,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         
         guard let videoDevice = defaultVideoDevice else {
             print("Could not find any video device")
-            setupResult = .configurationFailed
+            setSetupResult(.configurationFailed)
             return
         }
         
@@ -300,7 +653,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             videoDeviceInput = try AVCaptureDeviceInput(device: videoDevice)
         } catch {
             print("Could not create video device input: \(error)")
-            setupResult = .configurationFailed
+            setSetupResult(.configurationFailed)
             return
         }
         
@@ -312,7 +665,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         // Add a video input
         guard session.canAddInput(videoDeviceInput) else {
             print("Could not add video device input to the session")
-            setupResult = .configurationFailed
+            setSetupResult(.configurationFailed)
             session.commitConfiguration()
             return
         }
@@ -324,7 +677,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             videoDataOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)]
         } else {
             print("Could not add video data output to the session")
-            setupResult = .configurationFailed
+            setSetupResult(.configurationFailed)
             session.commitConfiguration()
             return
         }
@@ -340,7 +693,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             }
         } else {
             print("Could not add depth data output to the session")
-            setupResult = .configurationFailed
+            setSetupResult(.configurationFailed)
             session.commitConfiguration()
             return
         }
@@ -360,7 +713,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             videoDevice.unlockForConfiguration()
         } catch {
             print("Could not lock device for configuration: \(error)")
-            setupResult = .configurationFailed
+            setSetupResult(.configurationFailed)
             session.commitConfiguration()
             return
         }
@@ -397,6 +750,33 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 print("Could not lock device for configuration: \(error)")
             }
         }
+    }
+    
+    @IBAction private func changeMixFactor(_ sender: UISlider) {
+        _ = sender.value
+    }
+    
+    @IBAction private func changeDepthSmoothing(_ sender: UISwitch) {
+        let smoothingEnabled = sender.isOn
+        
+        sessionQueue.async {
+            self.depthDataOutput.isFilteringEnabled = smoothingEnabled
+        }
+    }
+    
+    @IBAction func changeCloudToJET(_ sender: UISegmentedControl) {
+        JETEnabled = true
+    }
+    
+    @IBAction private func focusAndExposeTap(_ gesture: UITapGestureRecognizer) {
+        let location = gesture.location(in: jetView)
+        guard let texturePoint = jetView.texturePointForView(point: location) else {
+            return
+        }
+        
+        let textureRect = CGRect(origin: texturePoint, size: .zero)
+        let deviceRect = videoDataOutput.metadataOutputRectConverted(fromOutputRect: textureRect)
+        focus(with: .autoFocus, exposureMode: .autoExpose, at: deviceRect.origin, monitorSubjectAreaChange: true)
     }
     
     @objc
@@ -496,7 +876,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             if !self.session.isRunning {
                 DispatchQueue.main.async {
                     let message = NSLocalizedString("Unable to resume", comment: "Alert message when unable to resume the session running")
-                    let alertController = UIAlertController(title: "Rhinovate", message: message, preferredStyle: .alert)
+                    let alertController = UIAlertController(title: "TrueDepthStreamer", message: message, preferredStyle: .alert)
                     let cancelAction = UIAlertAction(title: NSLocalizedString("OK", comment: "Alert OK button"), style: .cancel, handler: nil)
                     alertController.addAction(cancelAction)
                     self.present(alertController, animated: true, completion: nil)
@@ -526,6 +906,10 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             } else {
                 lastZoom = diff * factor
             }
+            DispatchQueue.main.async {
+                self.autoPanningSwitch.isOn = false
+                self.autoPanningIndex = -1
+            }
             cloudView.moveTowardCenter(lastZoom)
             lastScale = scale
         } else if gesture.state == .ended {
@@ -543,6 +927,10 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             lastXY = pnt
         } else if (.failed != gesture.state) && (.cancelled != gesture.state) {
             let pnt: CGPoint = gesture.translation(in: cloudView)
+            DispatchQueue.main.async {
+                self.autoPanningSwitch.isOn = false
+                self.autoPanningIndex = -1
+            }
             cloudView.yawAroundCenter(Float((pnt.x - lastXY.x) * 0.1))
             cloudView.pitchAroundCenter(Float((pnt.y - lastXY.y) * 0.1))
             lastXY = pnt
@@ -550,6 +938,10 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     }
     
     @IBAction private func handleDoubleTap(gesture: UITapGestureRecognizer) {
+        DispatchQueue.main.async {
+            self.autoPanningSwitch.isOn = false
+            self.autoPanningIndex = -1
+        }
         cloudView.resetView()
     }
     
@@ -560,56 +952,246 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         
         if gesture.state == .changed {
             let rot = Float(gesture.rotation)
+            DispatchQueue.main.async {
+                self.autoPanningSwitch.isOn = false
+                self.autoPanningIndex = -1
+            }
             cloudView.rollAroundCenter(rot * 60)
             gesture.rotation = 0
         }
     }
     
-    // MARK: - PLY Capture
-    @IBAction private func capturePLY(_ sender: UIButton) {
-        var depthData: AVDepthData?
-        var colorBuffer: CVPixelBuffer?
-        latestFrameQueue.sync {
-            depthData = latestDepthData
-            colorBuffer = latestColorBuffer
+    // MARK: - JET view Depth label gesture
+    
+    @IBAction private func handleLongPressJET(gesture: UILongPressGestureRecognizer) {
+        
+        switch gesture.state {
+        case .began:
+            touchDetected = true
+            let pnt: CGPoint = gesture.location(in: self.jetView)
+            touchCoordinates = pnt
+        case .changed:
+            let pnt: CGPoint = gesture.location(in: self.jetView)
+            touchCoordinates = pnt
+        case .possible, .ended, .cancelled, .failed:
+            touchDetected = false
+            DispatchQueue.main.async {
+                self.touchDepth.text = ""
+            }
+        @unknown default:
+            print("Unknow gesture state.")
+            touchDetected = false
         }
-
-        guard let depthData, let colorBuffer else {
-            presentSimpleAlert(title: "Rhinovate", message: "No depth frame available yet.")
+    }
+    
+    @IBAction func didAutoPanningChange(_ sender: Any) {
+        if autoPanningSwitch.isOn {
+            self.autoPanningIndex = 0
+        } else {
+            self.autoPanningIndex = -1
+        }
+    }
+    
+    // MARK: - Video + Depth Frame Processing
+// luozc
+    @IBAction func didAutoSavingChange(_ sender: Any) {
+        let savingEnabled = autoSavingSwitch.isOn ? true : false
+        processingQueue.async {
+            self.savingEnabled = savingEnabled
+        }
+    }
+    
+    @available(iOS 14.0, *)
+    func saveAllBufferInFrame(video videoPixelBuffer: CVPixelBuffer,
+                              depth depthPixelBuffer: CVPixelBuffer) {
+        let videoImage = CIImage(cvPixelBuffer: videoPixelBuffer)
+        
+        guard let perceptualColorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            videoData = nil
             return
         }
-
-        captureButton.isEnabled = false
-        processingQueue.async {
-            guard let plyData = self.buildPLY(depthData: depthData,
-                                              colorBuffer: colorBuffer,
-                                              stride: 2) else {
-            DispatchQueue.main.async {
-                    self.captureButton.isEnabled = true
-                    self.presentSimpleAlert(title: "Rhinovate", message: "Unable to generate PLY data.")
-                }
-                return
+        videoData = context.pngRepresentation(of: videoImage, format: .BGRA8, colorSpace: perceptualColorSpace)
+        
+        if !self.photoDepthConverter.isPrepared {
+            var depthFormatDescription: CMFormatDescription?
+            CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
+                                                         imageBuffer: depthPixelBuffer,
+                                                         formatDescriptionOut: &depthFormatDescription)
+            
+            /*
+             outputRetainedBufferCountHint is the number of pixel buffers we expect to hold on to from the renderer.
+             This value informs the renderer how to size its buffer pool and how many pixel buffers to preallocate.
+             Allow 3 frames of latency to cover the dispatch_async call.
+             */
+            if let unwrappedDepthFormatDescription = depthFormatDescription {
+                self.photoDepthConverter.prepare(with: unwrappedDepthFormatDescription, outputRetainedBufferCountHint: 3)
             }
+        }
+        
+        PHPhotoLibrary.requestAuthorization { status in
+            if status == .authorized {
+                PHPhotoLibrary.shared().performChanges({
+                    // Save Video Frame to Photos Library only if it was generated
+                    if let videoData = self.videoData {
+                        let creationRequest = PHAssetCreationRequest.forAsset()
+                        creationRequest.addResource(with: .photo,
+                                                    data: videoData,
+                                                    options: nil)
+                    }
+// lzchao
+                    // TODO: lzchao save depth json to file manager
+                    guard let convertedDepthPixelBuffer = self.photoDepthConverter.render(pixelBuffer: depthPixelBuffer) else {
+                        print("Unable to convert depth pixel buffer")
+                        return
+                    }
+                    
+                    let wrappedDepthJson = wrapEstimateImageData(depthMap: convertedDepthPixelBuffer, calibration: nil)
 
-            guard let savedURL = self.savePLY(data: plyData) else {
-                DispatchQueue.main.async {
-                    self.captureButton.isEnabled = true
-                    self.presentSimpleAlert(title: "Rhinovate", message: "Failed to save PLY file.")
+                    if let documentDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                        let formatter = DateFormatter()
+                        formatter.dateFormat = "yy-MM-dd_HH-mm-ss"
+                        formatter.locale = Locale.init(identifier: "en_US_POSIX")
+                        let timeInterval = Date().timeIntervalSince1970
+                        let msecond = CLongLong(round(timeInterval * 1000))
+                        let FileName =  String(format: "/%@_\(msecond).json", formatter.string(from: Date()))
+
+                        let pathWithFileName = documentDirectory.appendingPathComponent(String(FileName))
+                        do {
+                            try wrappedDepthJson.write(to: pathWithFileName)
+                        } catch {
+                            print("Could not write \(FileName) at dir: \(documentDirectory)")
+                        }
+                    }
+// lzchao
+                }, completionHandler: { _, error in
+                    if let error = error {
+                        print("Error occurred while saving photo to photo library: \(error)")
+                    }
                 }
-                return
-            }
-
-            DispatchQueue.main.async {
-                self.captureButton.isEnabled = true
-                self.presentSimpleAlert(title: "PLY Saved",
-                                        message: "Saved to Documents as \(savedURL.lastPathComponent)")
+                )
+            } else {
+                print("Without authorized")
             }
         }
     }
+// luozc
+    func dataOutputSynchronizer(_ synchronizer: AVCaptureDataOutputSynchronizer,
+                                didOutput synchronizedDataCollection: AVCaptureSynchronizedDataCollection) {
+        
+        if !renderingEnabled {
+            return
+        }
+        
+        // Read all outputs
+        guard renderingEnabled,
+            let syncedDepthData: AVCaptureSynchronizedDepthData =
+            synchronizedDataCollection.synchronizedData(for: depthDataOutput) as? AVCaptureSynchronizedDepthData,
+            let syncedVideoData: AVCaptureSynchronizedSampleBufferData =
+            synchronizedDataCollection.synchronizedData(for: videoDataOutput) as? AVCaptureSynchronizedSampleBufferData else {
+                // only work on synced pairs
+                return
+        }
+        
+        if syncedDepthData.depthDataWasDropped || syncedVideoData.sampleBufferWasDropped {
+            return
+        }
+        
+        let depthData = syncedDepthData.depthData
+        // TODO: choose 16bit or 32bit
+        let depthPixelBuffer = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32).depthDataMap
+        let sampleBuffer = syncedVideoData.sampleBuffer
+        guard let videoPixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                return
+        }
+        
+        latestFrameQueue.sync {
+            latestDepthData = depthData
+            latestColorBuffer = videoPixelBuffer
+        }
+        
+// luozc
+        if savingEnabled {
+            processingQueue.async {
+                self.saveAllBufferInFrame(video: videoPixelBuffer, depth: depthPixelBuffer)
+            }
+        }
+// luozc
+        
+        if JETEnabled {
+            jetView.pixelBuffer = videoPixelBuffer
+        } else {
+            // point cloud
+            if self.autoPanningIndex >= 0 {
+                
+                // perform a circle movement
+                let moves = 200
+                
+                let factor = 2.0 * .pi / Double(moves)
+                
+                let pitch = sin(Double(self.autoPanningIndex) * factor) * 2
+                let yaw = cos(Double(self.autoPanningIndex) * factor) * 2
+                self.autoPanningIndex = (self.autoPanningIndex + 1) % moves
+                
+                cloudView?.resetView()
+                cloudView?.pitchAroundCenter(Float(pitch) * 10)
+                cloudView?.yawAroundCenter(Float(yaw) * 10)
+            }
+            
+            cloudView?.setDepthFrame(depthData, withTexture: videoPixelBuffer)
+        }
+    }
+    
+//    func updateDepthLabel(depthFrame: CVPixelBuffer, videoFrame: CVPixelBuffer) {
+//
+//        if touchDetected {
+//            guard let texturePoint = jetView.texturePointForView(point: self.touchCoordinates) else {
+//                DispatchQueue.main.async {
+//                    self.touchDepth.text = ""
+//                }
+//                return
+//            }
+//
+//            // scale
+//            let scale = CGFloat(CVPixelBufferGetWidth(depthFrame)) / CGFloat(CVPixelBufferGetWidth(videoFrame))
+//            let depthPoint = CGPoint(x: CGFloat(CVPixelBufferGetWidth(depthFrame)) - 1.0 - texturePoint.x * scale, y: texturePoint.y * scale)
+//
+//            assert(kCVPixelFormatType_DepthFloat16 == CVPixelBufferGetPixelFormatType(depthFrame))
+//            CVPixelBufferLockBaseAddress(depthFrame, .readOnly)
+//            let rowData = CVPixelBufferGetBaseAddress(depthFrame)! + Int(depthPoint.y) * CVPixelBufferGetBytesPerRow(depthFrame)
+//            // swift does not have an Float16 data type. Use UInt16 instead, and then translate
+//            var f16Pixel = rowData.assumingMemoryBound(to: Float16.self)[Int(depthPoint.x)]
+//            var f32Pixel = Float(0.0)
+//
+//            CVPixelBufferUnlockBaseAddress(depthFrame, .readOnly)
+//
+//            withUnsafeMutablePointer(to: &f16Pixel) { f16RawPointer in
+//                withUnsafeMutablePointer(to: &f32Pixel) { f32RawPointer in
+//                    var src = vImage_Buffer(data: f16RawPointer, height: 1, width: 1, rowBytes: 2)
+//                    var dst = vImage_Buffer(data: f32RawPointer, height: 1, width: 1, rowBytes: 4)
+//                    vImageConvert_Planar16FtoPlanarF(&src, &dst, 0)
+//                }
+//            }
+//
+//            // Convert the depth frame format to cm
+//            let depthString = String(format: "%.2f cm", f32Pixel * 100)
+//
+//            // Update the label
+//            DispatchQueue.main.async {
+//                self.touchDepth.textColor = UIColor.white
+//                self.touchDepth.text = depthString
+//                self.touchDepth.sizeToFit()
+//            }
+//        } else {
+//            DispatchQueue.main.async {
+//                self.touchDepth.text = ""
+//            }
+//        }
+//    }
 
+    // MARK: - PLY Export + Upload
     private func buildPLY(depthData: AVDepthData,
                           colorBuffer: CVPixelBuffer,
-                          stride: Int) -> Data? {
+                          strideStep: Int) -> Data? {
         guard let calibration = depthData.cameraCalibrationData else {
             return nil
         }
@@ -641,139 +1223,212 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
         }
 
-        guard let depthBase = CVPixelBufferGetBaseAddress(depthMap),
-              let colorBase = CVPixelBufferGetBaseAddress(colorBuffer) else {
+        guard let depthBaseAddress = CVPixelBufferGetBaseAddress(depthMap),
+              let colorBaseAddress = CVPixelBufferGetBaseAddress(colorBuffer) else {
             return nil
         }
 
-        let depthPtr = depthBase.assumingMemoryBound(to: Float.self)
-        let colorPtr = colorBase.assumingMemoryBound(to: UInt8.self)
+        let depthBuffer = depthBaseAddress.assumingMemoryBound(to: Float.self)
         let colorBytesPerRow = CVPixelBufferGetBytesPerRow(colorBuffer)
+        let colorBufferPtr = colorBaseAddress.assumingMemoryBound(to: UInt8.self)
+
+        var vertices: [String] = []
+        vertices.reserveCapacity((depthWidth / strideStep) * (depthHeight / strideStep))
+
         let colorScaleX = Float(colorWidth) / Float(depthWidth)
         let colorScaleY = Float(colorHeight) / Float(depthHeight)
 
-        var vertexCount = 0
-        var y = 0
-        while y < depthHeight {
-            var x = 0
-            while x < depthWidth {
-                let depth = depthPtr[y * depthWidth + x]
-                if depth.isFinite && depth > 0 {
-                    vertexCount += 1
+        for y in Swift.stride(from: 0, to: depthHeight, by: strideStep) {
+            for x in Swift.stride(from: 0, to: depthWidth, by: strideStep) {
+                let depth = depthBuffer[y * depthWidth + x]
+                if !depth.isFinite || depth <= 0 {
+                    continue
                 }
-                x += stride
+
+                let xf = (Float(x) - cx) / fx * depth
+                let yf = (Float(y) - cy) / fy * depth
+                let zf = depth
+
+                let colorX = min(max(Int(Float(x) * colorScaleX), 0), colorWidth - 1)
+                let colorY = min(max(Int(Float(y) * colorScaleY), 0), colorHeight - 1)
+                let colorOffset = colorY * colorBytesPerRow + colorX * 4
+
+                let b = colorBufferPtr[colorOffset]
+                let g = colorBufferPtr[colorOffset + 1]
+                let r = colorBufferPtr[colorOffset + 2]
+
+                vertices.append("\(xf) \(yf) \(zf) \(r) \(g) \(b)")
             }
-            y += stride
         }
 
-        var data = Data()
-        let header = """
-        ply
-        format ascii 1.0
-        element vertex \(vertexCount)
-        property float x
-        property float y
-        property float z
-        property uchar red
-        property uchar green
-        property uchar blue
-        end_header
-
-        """
-        data.append(contentsOf: header.utf8)
-
-        y = 0
-        while y < depthHeight {
-            var x = 0
-            while x < depthWidth {
-                let depth = depthPtr[y * depthWidth + x]
-                if depth.isFinite && depth > 0 {
-                    let xCam = (Float(x) - cx) * depth / fx
-                    let yCam = (Float(y) - cy) * depth / fy
-
-                    let colorX = min(colorWidth - 1, max(0, Int(Float(x) * colorScaleX)))
-                    let colorY = min(colorHeight - 1, max(0, Int(Float(y) * colorScaleY)))
-                    let colorIndex = colorY * colorBytesPerRow + colorX * 4
-                    let blue = colorPtr[colorIndex]
-                    let green = colorPtr[colorIndex + 1]
-                    let red = colorPtr[colorIndex + 2]
-
-                    let line = "\(xCam) \(yCam) \(depth) \(red) \(green) \(blue)\n"
-                    data.append(contentsOf: line.utf8)
-                }
-                x += stride
-            }
-            y += stride
+        if vertices.count < 1000 {
+            return nil
         }
 
-        return data
+        var header = "ply\n"
+        header += "format ascii 1.0\n"
+        header += "element vertex \(vertices.count)\n"
+        header += "property float x\n"
+        header += "property float y\n"
+        header += "property float z\n"
+        header += "property uchar red\n"
+        header += "property uchar green\n"
+        header += "property uchar blue\n"
+        header += "end_header\n"
+
+        let body = vertices.joined(separator: "\n")
+        let output = header + body + "\n"
+        return output.data(using: .utf8)
+    }
+
+    private func pollScanStatus(scanId: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard let url = URL(string: "https://backend-for-rhinovate-ios-app-ply-to-glb.onrender.com/api/scans/\(scanId)/status") else {
+            completion(.failure(UploadError.invalidResponse))
+            return
+        }
+
+        let deadline = Date().addingTimeInterval(180)
+
+        func checkStatus() {
+            let task = URLSession.shared.dataTask(with: url) { data, response, error in
+                if let error = error {
+                    completion(.failure(error))
+                    return
+                }
+
+                guard let data = data,
+                      let httpResponse = response as? HTTPURLResponse,
+                      (200...299).contains(httpResponse.statusCode) else {
+                    completion(.failure(UploadError.invalidResponse))
+                    return
+                }
+
+                let payload = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any]
+                let status = ((payload?["state"] as? String) ?? (payload?["status"] as? String))?.lowercased() ?? "unknown"
+
+                if status == "ready" {
+                    completion(.success(()))
+                    return
+                }
+
+                if status == "failed" {
+                    let detail = (payload?["detail"] as? String)
+                        ?? (payload?["message"] as? String)
+                        ?? "Backend processing failed."
+                    completion(.failure(UploadError.serverError(detail)))
+                    return
+                }
+
+                if Date() > deadline {
+                    completion(.failure(UploadError.serverError("Processing timed out. Try again.")))
+                    return
+                }
+
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+                    checkStatus()
+                }
+            }
+            task.resume()
+        }
+
+        checkStatus()
+    }
+
+    private func uploadPLY(data: Data, completion: @escaping (Result<String, Error>) -> Void) {
+        guard let url = URL(string: "https://backend-for-rhinovate-ios-app-ply-to-glb.onrender.com/api/scans") else {
+            completion(.failure(UploadError.invalidResponse))
+            return
+        }
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 300
+
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"ply\"; filename=\"scan.ply\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
+        body.append(data)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+
+        let timeoutItem = DispatchWorkItem {
+            completion(.failure(UploadError.serverError("Upload timed out. Try Wi‑Fi or reduce scan size.")))
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 300, execute: timeoutItem)
+
+        let sessionConfig = URLSessionConfiguration.default
+        sessionConfig.waitsForConnectivity = true
+        sessionConfig.timeoutIntervalForRequest = 300
+        sessionConfig.timeoutIntervalForResource = 300
+        let session = URLSession(configuration: sessionConfig)
+
+        let task = session.uploadTask(with: request, from: body) { responseData, response, error in
+            timeoutItem.cancel()
+            if let error = error {
+                completion(.failure(error))
+                return
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  let responseData = responseData else {
+                completion(.failure(UploadError.invalidResponse))
+                return
+            }
+
+            if !(200...299).contains(httpResponse.statusCode) {
+                let message = String(data: responseData, encoding: .utf8) ?? "Server error."
+                completion(.failure(UploadError.serverError(message)))
+                return
+            }
+
+            do {
+                let payload = try JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+                if let scanId = payload?["scanId"] as? String {
+                    completion(.success(scanId))
+                } else {
+                    completion(.failure(UploadError.invalidResponse))
+                }
+            } catch {
+                completion(.failure(error))
+            }
+        }
+
+        task.resume()
     }
 
     private func savePLY(data: Data) -> URL? {
-        guard let documentDirectory = FileManager.default.urls(for: .documentDirectory,
-                                                              in: .userDomainMask).first else {
+        let filename = "rhinovate-\(UUID().uuidString).ply"
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(filename)
+        do {
+            try data.write(to: url)
+            return url
+        } catch {
             return nil
         }
+    }
 
-                        let formatter = DateFormatter()
-                        formatter.dateFormat = "yy-MM-dd_HH-mm-ss"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-                        let timeInterval = Date().timeIntervalSince1970
-                        let msecond = CLongLong(round(timeInterval * 1000))
-        let fileName = "Rhinovate_\(formatter.string(from: Date()))_\(msecond).ply"
-        let fileURL = documentDirectory.appendingPathComponent(fileName)
+    private func openFrontend(scanId: String) {
+        guard let url = URL(string: "https://productfrontend-7hf.pages.dev/?scanId=\(scanId)") else {
+            presentSimpleAlert(title: "Rhinovate", message: "Scan uploaded. ID: \(scanId)")
+            return
+        }
 
-                        do {
-            try data.write(to: fileURL, options: .atomic)
-            return fileURL
-                        } catch {
-            print("Could not write PLY to \(fileURL): \(error)")
-            return nil
+        UIApplication.shared.open(url, options: [:]) { success in
+            if !success {
+                self.presentSimpleAlert(title: "Rhinovate", message: "Scan uploaded. ID: \(scanId)")
+            }
         }
     }
 
     private func presentSimpleAlert(title: String, message: String) {
-        let alertController = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alertController.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: "Alert OK button"),
-                                                style: .cancel,
-                                                handler: nil))
-        present(alertController, animated: true, completion: nil)
+        DispatchQueue.main.async {
+            let alertController = UIAlertController(title: title, message: message, preferredStyle: .alert)
+            alertController.addAction(UIAlertAction(title: "OK", style: .default, handler: nil))
+            self.present(alertController, animated: true, completion: nil)
+        }
     }
-
-    // MARK: - Video + Depth Frame Processing
-    func dataOutputSynchronizer(_ synchronizer: AVCaptureDataOutputSynchronizer,
-                                didOutput synchronizedDataCollection: AVCaptureSynchronizedDataCollection) {
-        
-        if !renderingEnabled {
-            return
-        }
-        
-        // Read all outputs
-        guard renderingEnabled,
-            let syncedDepthData: AVCaptureSynchronizedDepthData =
-            synchronizedDataCollection.synchronizedData(for: depthDataOutput) as? AVCaptureSynchronizedDepthData,
-            let syncedVideoData: AVCaptureSynchronizedSampleBufferData =
-            synchronizedDataCollection.synchronizedData(for: videoDataOutput) as? AVCaptureSynchronizedSampleBufferData else {
-                // only work on synced pairs
-                return
-        }
-        
-        if syncedDepthData.depthDataWasDropped || syncedVideoData.sampleBufferWasDropped {
-            return
-        }
-        
-        let depthData = syncedDepthData.depthData
-        let sampleBuffer = syncedVideoData.sampleBuffer
-        guard let videoPixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-                return
-        }
-        
-        latestFrameQueue.sync {
-            self.latestDepthData = depthData
-            self.latestColorBuffer = videoPixelBuffer
-        }
-            
-            cloudView?.setDepthFrame(depthData, withTexture: videoPixelBuffer)
-    }
+    
 }
 
