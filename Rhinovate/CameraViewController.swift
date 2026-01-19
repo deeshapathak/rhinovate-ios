@@ -362,9 +362,12 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     }
 
     private func performCapture() {
-        if !isDistanceAcceptable() || !isDepthQualityAcceptable() {
+        updateDepthQuality()
+        let distanceOk = isDistanceAcceptable()
+        let depthOk = isDepthQualityAcceptable()
+        if !distanceOk || !depthOk {
             setCaptureButton(title: "Capture PLY", isEnabled: true)
-            presentSimpleAlert(title: "Rhinovate", message: "Move to 30–45 cm and improve lighting. Depth quality is too low.")
+            presentSimpleAlert(title: "Rhinovate", message: "Move to 20–55 cm and improve lighting. Depth quality is too low.")
             return
         }
 
@@ -549,14 +552,16 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         let distance = estimateCenterDistanceMeters()
         if let distance {
             let cm = distance * 100.0
-            guidanceDistanceLabel?.text = String(format: "Distance: %.0f cm (target 30–45 cm)", cm)
+            guidanceDistanceLabel?.text = String(format: "Distance: %.0f cm (target 20–55 cm)", cm)
         } else {
-            guidanceDistanceLabel?.text = "Distance: -- (target 30–45 cm)"
+            guidanceDistanceLabel?.text = "Distance: -- (target 20–55 cm)"
         }
 
         updateDepthQuality()
         let quality = qualityText(pointCount: lastPointCount, distance: distance)
-        guidanceQualityLabel?.text = quality
+        let depthRatio = lastDepthPixelCount > 0 ? (Float(lastValidDepthCount) / Float(lastDepthPixelCount)) : 0
+        let depthPercent = Int(depthRatio * 100)
+        guidanceQualityLabel?.text = "\(quality) • depth \(depthPercent)% • pts \(lastPointCount)"
     }
 
     private func scanCueText(elapsed: TimeInterval, total: TimeInterval) -> String {
@@ -673,14 +678,14 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             return false
         }
         let ratio = Float(lastValidDepthCount) / Float(lastDepthPixelCount)
-        return ratio >= 0.15
+        return ratio >= 0.05
     }
 
     private func isDistanceAcceptable() -> Bool {
         guard let distance = estimateCenterDistanceMeters() else {
             return false
         }
-        return distance >= 0.30 && distance <= 0.45
+        return distance >= 0.20 && distance <= 0.55
     }
 
     private func currentInterfaceOrientation() -> UIInterfaceOrientation {
@@ -688,15 +693,20 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             if #available(iOS 26.0, *) {
                 return scene.effectiveGeometry.interfaceOrientation
             }
-            return scene.interfaceOrientation
+            return legacyInterfaceOrientation(scene)
         }
         if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
             if #available(iOS 26.0, *) {
                 return scene.effectiveGeometry.interfaceOrientation
             }
-            return scene.interfaceOrientation
+            return legacyInterfaceOrientation(scene)
         }
         return .portrait
+    }
+
+    @available(iOS, deprecated: 26.0)
+    private func legacyInterfaceOrientation(_ scene: UIWindowScene) -> UIInterfaceOrientation {
+        scene.interfaceOrientation
     }
 
     private func previewRotation(interfaceOrientation: UIInterfaceOrientation,
@@ -794,7 +804,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         dataOutputQueue.async {
             self.renderingEnabled = false
         }
-        let currentSetupResult = setupResult
+        let currentSetupResult = readSetupResult()
         sessionQueue.async {
             if currentSetupResult == .success {
                 self.session.stopRunning()
