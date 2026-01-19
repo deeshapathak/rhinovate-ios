@@ -187,6 +187,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var lastPointCount: Int = 0
     private var lastValidDepthCount: Int = 0
     private var lastDepthPixelCount: Int = 0
+    private var depthLowStreak: Int = 0
     
     private var renderingEnabled = true
     
@@ -368,6 +369,11 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         updateDepthQuality()
         let distanceOk = isDistanceAcceptable()
         let depthOk = isDepthQualityAcceptable()
+        if depthLowStreak >= 10 {
+            setCaptureButton(title: "Capture PLY", isEnabled: true)
+            presentSimpleAlert(title: "Rhinovate", message: "TrueDepth not available. Close other camera apps and restart the phone.")
+            return
+        }
         if !distanceOk || !depthOk {
             setCaptureButton(title: "Capture PLY", isEnabled: true)
             presentSimpleAlert(title: "Rhinovate", message: "Move to 20–55 cm and improve lighting. Depth quality is too low.")
@@ -626,7 +632,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         let enoughPoints = pointCount >= 20000
         let distanceOk: Bool
         if let distance {
-            distanceOk = distance >= 0.30 && distance <= 0.45
+            distanceOk = distance >= 0.20 && distance <= 0.55
         } else {
             distanceOk = false
         }
@@ -634,6 +640,9 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         let depthOk = isDepthQualityAcceptable()
         if enoughPoints && distanceOk && depthOk {
             return "Quality: good"
+        }
+        if depthLowStreak >= 10 {
+            return "Quality: TrueDepth unavailable"
         }
         if !distanceOk {
             return "Quality: adjust distance"
@@ -674,6 +683,12 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             }
         }
         lastValidDepthCount = validCount
+        let ratio = lastDepthPixelCount > 0 ? Float(validCount) / Float(lastDepthPixelCount) : 0
+        if ratio < 0.01 {
+            depthLowStreak += 1
+        } else {
+            depthLowStreak = 0
+        }
     }
 
     private func isDepthQualityAcceptable() -> Bool {
