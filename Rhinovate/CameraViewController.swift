@@ -139,6 +139,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private enum CaptureError: LocalizedError {
         case noFrames
         case insufficientPoints
+        case sparsePoints(Int)
         
         var errorDescription: String? {
             switch self {
@@ -146,6 +147,8 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 return "No depth frames available. Try again."
             case .insufficientPoints:
                 return "Scan too sparse. Move closer and hold still."
+            case .sparsePoints(let count):
+                return "Collected only \(count) points. Move closer and improve lighting."
             }
         }
     }
@@ -1586,7 +1589,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                     return
                 }
                 guard points.count >= 1000 else {
-                    completion(.failure(CaptureError.insufficientPoints))
+                    completion(.failure(CaptureError.sparsePoints(points.count)))
                     return
                 }
                 if let data = self.buildPLYData(from: points) {
