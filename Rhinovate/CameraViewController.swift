@@ -172,6 +172,16 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var latestColorBuffer: CVPixelBuffer?
     
     private var captureButton: UIButton?
+    private var guidanceContainer: UIView?
+    private var guidanceTitleLabel: UILabel?
+    private var guidanceDetailLabel: UILabel?
+    private var guidanceProgress: UIProgressView?
+    private var guidanceDistanceLabel: UILabel?
+    private var guidanceQualityLabel: UILabel?
+    private var scanStartTime: Date?
+    private var scanDuration: TimeInterval = 5.0
+    private var scanTimer: Timer?
+    private var lastPointCount: Int = 0
     
     private var renderingEnabled = true
     
@@ -244,6 +254,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         cloudView.addGestureRecognizer(panOneFingerGesture)
         
         setupCaptureButton()
+        setupGuidanceOverlay()
         
         JETEnabled = false
         cloudToJETSegCtrl.selectedSegmentIndex = 1
@@ -350,7 +361,16 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 
     private func performCapture() {
         setCaptureButton(title: "Scanning...", isEnabled: false)
-        collectMultiFramePLY(duration: 2.5, interval: 0.2, strideStep: 6, maxPoints: 200_000) { result in
+        scanDuration = 5.0
+        scanStartTime = Date()
+        startGuidanceTimer()
+        collectMultiFramePLY(duration: scanDuration,
+                             interval: 0.15,
+                             strideStep: 4,
+                             maxPoints: 350_000) { result in
+            DispatchQueue.main.async {
+                self.stopGuidanceTimer()
+            }
             switch result {
             case .success(let plyData):
                 self.setCaptureButton(title: "Uploading...", isEnabled: false)
@@ -399,6 +419,208 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             }
             self.captureButton?.isEnabled = isEnabled
         }
+    }
+
+    private func setupGuidanceOverlay() {
+        if guidanceContainer != nil {
+            return
+        }
+
+        let container = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        container.layer.cornerRadius = 12
+
+        let title = UILabel()
+        title.translatesAutoresizingMaskIntoConstraints = false
+        title.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+        title.textColor = .white
+        title.text = "Capture Guidance"
+
+        let detail = UILabel()
+        detail.translatesAutoresizingMaskIntoConstraints = false
+        detail.font = UIFont.systemFont(ofSize: 13, weight: .regular)
+        detail.textColor = .white
+        detail.numberOfLines = 0
+        detail.text = "Set the phone down, center your face, and tap Capture."
+
+        let progress = UIProgressView(progressViewStyle: .default)
+        progress.translatesAutoresizingMaskIntoConstraints = false
+        progress.progress = 0.0
+        progress.trackTintColor = UIColor.white.withAlphaComponent(0.2)
+        progress.tintColor = UIColor.systemGreen
+
+        let distance = UILabel()
+        distance.translatesAutoresizingMaskIntoConstraints = false
+        distance.font = UIFont.systemFont(ofSize: 12, weight: .regular)
+        distance.textColor = UIColor.white.withAlphaComponent(0.85)
+        distance.text = "Distance: --"
+
+        let quality = UILabel()
+        quality.translatesAutoresizingMaskIntoConstraints = false
+        quality.font = UIFont.systemFont(ofSize: 12, weight: .regular)
+        quality.textColor = UIColor.white.withAlphaComponent(0.85)
+        quality.text = "Quality: --"
+
+        container.addSubview(title)
+        container.addSubview(detail)
+        container.addSubview(progress)
+        container.addSubview(distance)
+        container.addSubview(quality)
+
+        view.addSubview(container)
+
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            container.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            container.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+
+            title.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            title.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+
+            detail.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
+            detail.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            detail.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+
+            progress.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 10),
+            progress.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            progress.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+
+            distance.topAnchor.constraint(equalTo: progress.bottomAnchor, constant: 8),
+            distance.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            distance.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+
+            quality.topAnchor.constraint(equalTo: distance.bottomAnchor, constant: 4),
+            quality.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            quality.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            quality.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+        ])
+
+        guidanceContainer = container
+        guidanceTitleLabel = title
+        guidanceDetailLabel = detail
+        guidanceProgress = progress
+        guidanceDistanceLabel = distance
+        guidanceQualityLabel = quality
+    }
+
+    private func startGuidanceTimer() {
+        scanTimer?.invalidate()
+        lastPointCount = 0
+        guidanceProgress?.progress = 0.0
+        guidanceTitleLabel?.text = "Scanning..."
+        guidanceDetailLabel?.text = "Front → Left 30° → Front → Right 30° → Front"
+        guidanceQualityLabel?.text = "Quality: collecting..."
+
+        scanTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+            self?.updateGuidanceDuringScan()
+        }
+    }
+
+    private func stopGuidanceTimer() {
+        scanTimer?.invalidate()
+        scanTimer = nil
+        guidanceProgress?.progress = 0.0
+        guidanceTitleLabel?.text = "Capture Guidance"
+        guidanceDetailLabel?.text = "Set the phone down, center your face, and tap Capture."
+        guidanceQualityLabel?.text = "Quality: --"
+    }
+
+    private func updateGuidanceDuringScan() {
+        guard let scanStartTime else {
+            return
+        }
+        let elapsed = Date().timeIntervalSince(scanStartTime)
+        let progress = min(Float(elapsed / scanDuration), 1.0)
+        guidanceProgress?.progress = progress
+
+        let cue = scanCueText(elapsed: elapsed, total: scanDuration)
+        guidanceDetailLabel?.text = cue
+
+        let distance = estimateCenterDistanceMeters()
+        if let distance {
+            let cm = distance * 100.0
+            guidanceDistanceLabel?.text = String(format: "Distance: %.0f cm (target 30–45 cm)", cm)
+        } else {
+            guidanceDistanceLabel?.text = "Distance: -- (target 30–45 cm)"
+        }
+
+        let quality = qualityText(pointCount: lastPointCount, distance: distance)
+        guidanceQualityLabel?.text = quality
+    }
+
+    private func scanCueText(elapsed: TimeInterval, total: TimeInterval) -> String {
+        let segment = total / 5.0
+        switch elapsed {
+        case 0..<segment:
+            return "Hold steady: face front"
+        case segment..<(2 * segment):
+            return "Slowly turn left ~30°"
+        case (2 * segment)..<(3 * segment):
+            return "Return to center"
+        case (3 * segment)..<(4 * segment):
+            return "Slowly turn right ~30°"
+        default:
+            return "Return to center and hold"
+        }
+    }
+
+    private func estimateCenterDistanceMeters() -> Float? {
+        var depthData: AVDepthData?
+        latestFrameQueue.sync {
+            depthData = latestDepthData
+        }
+        guard let depthData else {
+            return nil
+        }
+        let depthMap = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32).depthDataMap
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+
+        let width = CVPixelBufferGetWidth(depthMap)
+        let height = CVPixelBufferGetHeight(depthMap)
+        guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else {
+            return nil
+        }
+        let buffer = baseAddress.assumingMemoryBound(to: Float.self)
+
+        let cx = width / 2
+        let cy = height / 2
+        var samples: [Float] = []
+        for dy in -2...2 {
+            for dx in -2...2 {
+                let x = min(max(cx + dx, 0), width - 1)
+                let y = min(max(cy + dy, 0), height - 1)
+                let depth = buffer[y * width + x]
+                if depth.isFinite && depth > 0 {
+                    samples.append(depth)
+                }
+            }
+        }
+        guard !samples.isEmpty else {
+            return nil
+        }
+        samples.sort()
+        return samples[samples.count / 2]
+    }
+
+    private func qualityText(pointCount: Int, distance: Float?) -> String {
+        let enoughPoints = pointCount >= 20000
+        let distanceOk: Bool
+        if let distance {
+            distanceOk = distance >= 0.30 && distance <= 0.45
+        } else {
+            distanceOk = false
+        }
+
+        if enoughPoints && distanceOk {
+            return "Quality: good"
+        }
+        if !distanceOk {
+            return "Quality: adjust distance"
+        }
+        return "Quality: collecting..."
     }
 
     private func currentInterfaceOrientation() -> UIInterfaceOrientation {
@@ -1316,6 +1538,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                                                   maxPoints: maxPoints) {
                     appended = true
                     sawFrame = true
+                    self.lastPointCount = points.count
                 }
 
                 let delay = appended ? interval : interval * 0.5
