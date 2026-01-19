@@ -182,6 +182,8 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var scanDuration: TimeInterval = 5.0
     private var scanTimer: Timer?
     private var lastPointCount: Int = 0
+    private var lastValidDepthCount: Int = 0
+    private var lastDepthPixelCount: Int = 0
     
     private var renderingEnabled = true
     
@@ -360,6 +362,12 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     }
 
     private func performCapture() {
+        if !isDistanceAcceptable() || !isDepthQualityAcceptable() {
+            setCaptureButton(title: "Capture PLY", isEnabled: true)
+            presentSimpleAlert(title: "Rhinovate", message: "Move to 30–45 cm and improve lighting. Depth quality is too low.")
+            return
+        }
+
         setCaptureButton(title: "Scanning...", isEnabled: false)
         scanDuration = 5.0
         scanStartTime = Date()
@@ -546,6 +554,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             guidanceDistanceLabel?.text = "Distance: -- (target 30–45 cm)"
         }
 
+        updateDepthQuality()
         let quality = qualityText(pointCount: lastPointCount, distance: distance)
         guidanceQualityLabel?.text = quality
     }
@@ -614,13 +623,64 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             distanceOk = false
         }
 
-        if enoughPoints && distanceOk {
+        let depthOk = isDepthQualityAcceptable()
+        if enoughPoints && distanceOk && depthOk {
             return "Quality: good"
         }
         if !distanceOk {
             return "Quality: adjust distance"
         }
+        if !depthOk {
+            return "Quality: improve lighting"
+        }
         return "Quality: collecting..."
+    }
+
+    private func updateDepthQuality() {
+        var depthData: AVDepthData?
+        latestFrameQueue.sync {
+            depthData = latestDepthData
+        }
+        guard let depthData else {
+            lastValidDepthCount = 0
+            lastDepthPixelCount = 0
+            return
+        }
+        let depthMap = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32).depthDataMap
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+
+        let width = CVPixelBufferGetWidth(depthMap)
+        let height = CVPixelBufferGetHeight(depthMap)
+        lastDepthPixelCount = width * height
+        guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else {
+            lastValidDepthCount = 0
+            return
+        }
+        let buffer = baseAddress.assumingMemoryBound(to: Float.self)
+        var validCount = 0
+        for i in 0..<(width * height) {
+            let depth = buffer[i]
+            if depth.isFinite && depth > 0 {
+                validCount += 1
+            }
+        }
+        lastValidDepthCount = validCount
+    }
+
+    private func isDepthQualityAcceptable() -> Bool {
+        if lastDepthPixelCount == 0 {
+            return false
+        }
+        let ratio = Float(lastValidDepthCount) / Float(lastDepthPixelCount)
+        return ratio >= 0.15
+    }
+
+    private func isDistanceAcceptable() -> Bool {
+        guard let distance = estimateCenterDistanceMeters() else {
+            return false
+        }
+        return distance >= 0.30 && distance <= 0.45
     }
 
     private func currentInterfaceOrientation() -> UIInterfaceOrientation {
