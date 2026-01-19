@@ -136,6 +136,20 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
     }
     
+    private enum CaptureError: LocalizedError {
+        case noFrames
+        case insufficientPoints
+        
+        var errorDescription: String? {
+            switch self {
+            case .noFrames:
+                return "No depth frames available. Try again."
+            case .insufficientPoints:
+                return "Scan too sparse. Move closer and hold still."
+            }
+        }
+    }
+    
     private var setupResult: SessionSetupResult = .success
     
     private let session = AVCaptureSession()
@@ -258,7 +272,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             AVCaptureDevice.requestAccess(for: .video, completionHandler: { granted in
                 if !granted {
                     DispatchQueue.main.async {
-                        self.setupResult = .notAuthorized
+                    self.setupResult = .notAuthorized
                     }
                 }
                 self.sessionQueue.resume()
@@ -335,58 +349,41 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     }
 
     private func performCapture() {
-        var depthData: AVDepthData?
-        var colorBuffer: CVPixelBuffer?
-        latestFrameQueue.sync {
-            depthData = latestDepthData
-            colorBuffer = latestColorBuffer
-        }
-
-        guard let depthData, let colorBuffer else {
-            setCaptureButton(title: "Capture PLY", isEnabled: true)
-            presentSimpleAlert(title: "Rhinovate", message: "No depth frame available yet.")
-            return
-        }
-
-        setCaptureButton(title: "Preparing...", isEnabled: false)
-        processingQueue.async {
-            guard let plyData = self.buildPLY(depthData: depthData,
-                                              colorBuffer: colorBuffer,
-                                              strideStep: 4) else {
-                DispatchQueue.main.async {
-                    self.setCaptureButton(title: "Capture PLY", isEnabled: true)
-                    self.presentSimpleAlert(title: "Rhinovate", message: "Unable to generate PLY data. Try better lighting and hold still.")
-                }
-                return
-            }
-
-            self.setCaptureButton(title: "Uploading...", isEnabled: false)
-            self.uploadPLY(data: plyData) { result in
-                DispatchQueue.main.async {
-                    switch result {
-                    case .success(let scanId):
-                        self.setCaptureButton(title: "Processing...", isEnabled: false)
-                        self.pollScanStatus(scanId: scanId) { statusResult in
-                            DispatchQueue.main.async {
-                                self.setCaptureButton(title: "Capture PLY", isEnabled: true)
-                                switch statusResult {
-                                case .success:
-                                    self.presentSimpleAlert(title: "Scan Ready",
-                                                            message: "Opening web app with scan.")
-                                    self.openFrontend(scanId: scanId)
-                                case .failure(let error):
-                                    self.presentSimpleAlert(title: "Scan Failed",
-                                                            message: error.localizedDescription)
+        setCaptureButton(title: "Scanning...", isEnabled: false)
+        collectMultiFramePLY(duration: 2.5, interval: 0.2, strideStep: 6, maxPoints: 200_000) { result in
+            switch result {
+            case .success(let plyData):
+                self.setCaptureButton(title: "Uploading...", isEnabled: false)
+                self.uploadPLY(data: plyData) { uploadResult in
+                    DispatchQueue.main.async {
+                        switch uploadResult {
+                        case .success(let scanId):
+                            self.setCaptureButton(title: "Processing...", isEnabled: false)
+                            self.pollScanStatus(scanId: scanId) { statusResult in
+                                DispatchQueue.main.async {
+                                    self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                                    switch statusResult {
+                                    case .success:
+                                        self.presentSimpleAlert(title: "Scan Ready",
+                                                                message: "Opening web app with scan.")
+                                        self.openFrontend(scanId: scanId)
+                                    case .failure(let error):
+                                        self.presentSimpleAlert(title: "Scan Failed",
+                                                                message: error.localizedDescription)
+                                    }
                                 }
                             }
+                        case .failure(let error):
+                            self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                            let _ = self.savePLY(data: plyData)
+                            self.presentSimpleAlert(title: "Upload Failed",
+                                                    message: "Saved PLY locally. Error: \(error.localizedDescription)")
                         }
-                    case .failure(let error):
-                        self.setCaptureButton(title: "Capture PLY", isEnabled: true)
-                        let _ = self.savePLY(data: plyData)
-                        self.presentSimpleAlert(title: "Upload Failed",
-                                                message: "Saved PLY locally. Error: \(error.localizedDescription)")
                     }
                 }
+            case .failure(let error):
+                self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                self.presentSimpleAlert(title: "Rhinovate", message: error.localizedDescription)
             }
         }
     }
@@ -1187,7 +1184,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 //            }
 //        }
 //    }
-
+    
     // MARK: - PLY Export + Upload
     private func buildPLY(depthData: AVDepthData,
                           colorBuffer: CVPixelBuffer,
@@ -1281,6 +1278,170 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         return output.data(using: .utf8)
     }
 
+    private func collectMultiFramePLY(duration: TimeInterval,
+                                      interval: TimeInterval,
+                                      strideStep: Int,
+                                      maxPoints: Int,
+                                      completion: @escaping (Result<Data, Error>) -> Void) {
+        processingQueue.async {
+            var points: [String] = []
+            let endTime = Date().addingTimeInterval(duration)
+            var sawFrame = false
+
+            func finalize() {
+                guard sawFrame else {
+                    completion(.failure(CaptureError.noFrames))
+                    return
+                }
+                guard points.count >= 1000 else {
+                    completion(.failure(CaptureError.insufficientPoints))
+                    return
+                }
+                if let data = self.buildPLYData(from: points) {
+                    completion(.success(data))
+                } else {
+                    completion(.failure(CaptureError.insufficientPoints))
+                }
+            }
+
+            func sampleNext() {
+                if Date() >= endTime || points.count >= maxPoints {
+                    finalize()
+                    return
+                }
+
+                var appended = false
+                if self.appendPLYPointsFromLatest(strideStep: strideStep,
+                                                  into: &points,
+                                                  maxPoints: maxPoints) {
+                    appended = true
+                    sawFrame = true
+                }
+
+                let delay = appended ? interval : interval * 0.5
+                DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                    self.processingQueue.async {
+                        sampleNext()
+                    }
+                }
+            }
+
+            sampleNext()
+        }
+    }
+
+    private func buildPLYData(from points: [String]) -> Data? {
+        var header = "ply\n"
+        header += "format ascii 1.0\n"
+        header += "element vertex \(points.count)\n"
+        header += "property float x\n"
+        header += "property float y\n"
+        header += "property float z\n"
+        header += "property uchar red\n"
+        header += "property uchar green\n"
+        header += "property uchar blue\n"
+        header += "end_header\n"
+
+        let body = points.joined(separator: "\n")
+        let output = header + body + "\n"
+        return output.data(using: .utf8)
+    }
+
+    private func appendPLYPointsFromLatest(strideStep: Int,
+                                           into points: inout [String],
+                                           maxPoints: Int) -> Bool {
+        var depthData: AVDepthData?
+        var colorBuffer: CVPixelBuffer?
+        latestFrameQueue.sync {
+            depthData = latestDepthData
+            colorBuffer = latestColorBuffer
+        }
+        guard let depthData, let colorBuffer else {
+            return false
+        }
+        return appendPLYPoints(depthData: depthData,
+                               colorBuffer: colorBuffer,
+                               strideStep: strideStep,
+                               into: &points,
+                               maxPoints: maxPoints)
+    }
+
+    private func appendPLYPoints(depthData: AVDepthData,
+                                 colorBuffer: CVPixelBuffer,
+                                 strideStep: Int,
+                                 into points: inout [String],
+                                 maxPoints: Int) -> Bool {
+        guard let calibration = depthData.cameraCalibrationData else {
+            return false
+        }
+
+        let depthMap = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32).depthDataMap
+        let depthWidth = CVPixelBufferGetWidth(depthMap)
+        let depthHeight = CVPixelBufferGetHeight(depthMap)
+        let colorWidth = CVPixelBufferGetWidth(colorBuffer)
+        let colorHeight = CVPixelBufferGetHeight(colorBuffer)
+
+        var intrinsics = calibration.intrinsicMatrix
+        let refSize = calibration.intrinsicMatrixReferenceDimensions
+        let scaleX = Float(refSize.width) / Float(depthWidth)
+        let scaleY = Float(refSize.height) / Float(depthHeight)
+        intrinsics.columns.0.x /= scaleX
+        intrinsics.columns.1.y /= scaleY
+        intrinsics.columns.2.x /= scaleX
+        intrinsics.columns.2.y /= scaleY
+
+        let fx = intrinsics.columns.0.x
+        let fy = intrinsics.columns.1.y
+        let cx = intrinsics.columns.2.x
+        let cy = intrinsics.columns.2.y
+
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        CVPixelBufferLockBaseAddress(colorBuffer, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(colorBuffer, .readOnly)
+            CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
+        }
+
+        guard let depthBaseAddress = CVPixelBufferGetBaseAddress(depthMap),
+              let colorBaseAddress = CVPixelBufferGetBaseAddress(colorBuffer) else {
+            return false
+        }
+
+        let depthBuffer = depthBaseAddress.assumingMemoryBound(to: Float.self)
+        let colorBytesPerRow = CVPixelBufferGetBytesPerRow(colorBuffer)
+        let colorBufferPtr = colorBaseAddress.assumingMemoryBound(to: UInt8.self)
+
+        let colorScaleX = Float(colorWidth) / Float(depthWidth)
+        let colorScaleY = Float(colorHeight) / Float(depthHeight)
+
+        for y in Swift.stride(from: 0, to: depthHeight, by: strideStep) {
+            for x in Swift.stride(from: 0, to: depthWidth, by: strideStep) {
+                if points.count >= maxPoints {
+                    return true
+                }
+                let depth = depthBuffer[y * depthWidth + x]
+                if !depth.isFinite || depth <= 0 {
+                    continue
+                }
+
+                let xf = (Float(x) - cx) / fx * depth
+                let yf = (Float(y) - cy) / fy * depth
+                let zf = depth
+
+                let colorX = min(max(Int(Float(x) * colorScaleX), 0), colorWidth - 1)
+                let colorY = min(max(Int(Float(y) * colorScaleY), 0), colorHeight - 1)
+                let colorOffset = colorY * colorBytesPerRow + colorX * 4
+
+                let b = colorBufferPtr[colorOffset]
+                let g = colorBufferPtr[colorOffset + 1]
+                let r = colorBufferPtr[colorOffset + 2]
+
+                points.append("\(xf) \(yf) \(zf) \(r) \(g) \(b)")
+            }
+        }
+        return true
+    }
+
     private func pollScanStatus(scanId: String, completion: @escaping (Result<Void, Error>) -> Void) {
         guard let url = URL(string: "https://backend-for-rhinovate-ios-app-ply-to-glb.onrender.com/api/scans/\(scanId)/status") else {
             completion(.failure(UploadError.invalidResponse))
@@ -1305,6 +1466,9 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 
                 let payload = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any]
                 let status = ((payload?["state"] as? String) ?? (payload?["status"] as? String))?.lowercased() ?? "unknown"
+                if let stage = payload?["stage"] as? String, status == "processing" {
+                    self.setCaptureButton(title: "Processing: \(stage.capitalized)", isEnabled: false)
+                }
 
                 if status == "ready" {
                     completion(.success(()))
