@@ -181,6 +181,9 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var guidanceProgress: UIProgressView?
     private var guidanceDistanceLabel: UILabel?
     private var guidanceQualityLabel: UILabel?
+    private var directionLabel: UILabel?
+    private var faceFrameView: UIView?
+    private var faceFrameLabel: UILabel?
     private var trueDepthStatusLabel: UILabel?
     private var depthHealthTimer: Timer?
     private var lastDepthFrameAt: Date?
@@ -387,7 +390,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
 
         setCaptureButton(title: "Scanning...", isEnabled: false)
-        scanDuration = 7.0
+        scanDuration = 8.0
         scanStartTime = Date()
         startGuidanceTimer()
         collectMultiFramePLY(duration: scanDuration,
@@ -529,6 +532,67 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         guidanceProgress = progress
         guidanceDistanceLabel = distance
         guidanceQualityLabel = quality
+
+        setupFaceFrameOverlay()
+        setupDirectionLabel()
+    }
+
+    private func setupFaceFrameOverlay() {
+        if faceFrameView != nil {
+            return
+        }
+
+        let frameView = UIView()
+        frameView.translatesAutoresizingMaskIntoConstraints = false
+        frameView.layer.borderColor = UIColor.white.withAlphaComponent(0.6).cgColor
+        frameView.layer.borderWidth = 2.0
+        frameView.layer.cornerRadius = 24
+        frameView.backgroundColor = UIColor.clear
+
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = "Keep face inside frame (avoid shoulders)"
+        label.textColor = UIColor.white.withAlphaComponent(0.85)
+        label.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        label.textAlignment = .center
+
+        view.addSubview(frameView)
+        view.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            frameView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            frameView.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -20),
+            frameView.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.62),
+            frameView.heightAnchor.constraint(equalTo: frameView.widthAnchor, multiplier: 1.25),
+
+            label.centerXAnchor.constraint(equalTo: frameView.centerXAnchor),
+            label.topAnchor.constraint(equalTo: frameView.bottomAnchor, constant: 6),
+        ])
+
+        faceFrameView = frameView
+        faceFrameLabel = label
+    }
+
+    private func setupDirectionLabel() {
+        if directionLabel != nil {
+            return
+        }
+
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = "Align face in frame"
+        label.textColor = UIColor.white
+        label.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+        label.textAlignment = .center
+
+        view.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            label.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 140),
+        ])
+
+        directionLabel = label
     }
 
     private func setupTrueDepthHealthOverlay() {
@@ -630,6 +694,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         guidanceTitleLabel?.text = "Scanning..."
         guidanceDetailLabel?.text = "Front → Left 30° → Front → Right 30° → Front"
         guidanceQualityLabel?.text = "Quality: collecting..."
+        directionLabel?.text = "Hold steady: face front"
 
         scanTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             self?.updateGuidanceDuringScan()
@@ -643,6 +708,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         guidanceTitleLabel?.text = "Capture Guidance"
         guidanceDetailLabel?.text = "Set the phone down, center your face, and tap Capture."
         guidanceQualityLabel?.text = "Quality: --"
+        directionLabel?.text = "Align face in frame"
     }
 
     private func updateGuidanceDuringScan() {
@@ -655,6 +721,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 
         let cue = scanCueText(elapsed: elapsed, total: scanDuration)
         guidanceDetailLabel?.text = cue
+        directionLabel?.text = scanDirectionText(elapsed: elapsed, total: scanDuration)
 
         let distance = estimateCenterDistanceMeters()
         if let distance {
@@ -684,6 +751,22 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             return "Slowly turn right ~30°"
         default:
             return "Return to center and hold"
+        }
+    }
+
+    private func scanDirectionText(elapsed: TimeInterval, total: TimeInterval) -> String {
+        let segment = total / 5.0
+        switch elapsed {
+        case 0..<segment:
+            return "⬆︎ Face front"
+        case segment..<(2 * segment):
+            return "⬅︎ Turn left ~30°"
+        case (2 * segment)..<(3 * segment):
+            return "⬆︎ Return to center"
+        case (3 * segment)..<(4 * segment):
+            return "➡︎ Turn right ~30°"
+        default:
+            return "⬆︎ Return to center"
         }
     }
 
