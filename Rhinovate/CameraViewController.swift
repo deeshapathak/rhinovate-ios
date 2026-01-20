@@ -381,13 +381,13 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
 
         setCaptureButton(title: "Scanning...", isEnabled: false)
-        scanDuration = 5.0
+        scanDuration = 7.0
         scanStartTime = Date()
         startGuidanceTimer()
         collectMultiFramePLY(duration: scanDuration,
                              interval: 0.15,
                              strideStep: 4,
-                             maxPoints: 350_000) { result in
+                             maxPoints: 500_000) { result in
             DispatchQueue.main.async {
                 self.stopGuidanceTimer()
             }
