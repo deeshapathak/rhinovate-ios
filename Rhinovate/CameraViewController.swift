@@ -1810,7 +1810,12 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     }
 
     private func uploadPLY(data: Data, completion: @escaping (Result<String, Error>) -> Void) {
-        guard let url = URL(string: "https://backend-for-rhinovate-ios-app-ply-to-glb.onrender.com/api/scans") else {
+        var components = URLComponents(string: "https://backend-for-rhinovate-ios-app-ply-to-glb.onrender.com/api/scans")
+        components?.queryItems = [
+            URLQueryItem(name: "unit_scale", value: "1.0"),
+            URLQueryItem(name: "units", value: "meters")
+        ]
+        guard let url = components?.url else {
             completion(.failure(UploadError.invalidResponse))
             return
         }
