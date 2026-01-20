@@ -1869,7 +1869,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             return
         }
 
-        let deadline = Date().addingTimeInterval(180)
+        let deadline = Date().addingTimeInterval(600)
 
         func checkStatus() {
             let task = URLSession.shared.dataTask(with: url) { data, response, error in
@@ -1913,7 +1913,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 }
 
                 if Date() > deadline {
-                    completion(.failure(UploadError.serverError("Processing timed out. Try again.")))
+                    completion(.failure(UploadError.serverError("Processing timed out after 10 minutes. Try again.")))
                     return
                 }
 
