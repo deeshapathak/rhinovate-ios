@@ -908,20 +908,15 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             if #available(iOS 26.0, *) {
                 return scene.effectiveGeometry.interfaceOrientation
             }
-            return legacyInterfaceOrientation(scene)
+            return scene.interfaceOrientation
         }
         if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
             if #available(iOS 26.0, *) {
                 return scene.effectiveGeometry.interfaceOrientation
             }
-            return legacyInterfaceOrientation(scene)
+            return scene.interfaceOrientation
         }
         return .portrait
-    }
-
-    @available(iOS, deprecated: 26.0)
-    private func legacyInterfaceOrientation(_ scene: UIWindowScene) -> UIInterfaceOrientation {
-        scene.interfaceOrientation
     }
 
     private func previewRotation(interfaceOrientation: UIInterfaceOrientation,
@@ -1029,9 +1024,12 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
         let currentSetupResult = readSetupResult()
         sessionQueue.async {
-            if currentSetupResult == .success {
+            switch currentSetupResult {
+            case .success:
                 self.session.stopRunning()
                 self.isSessionRunning = self.session.isRunning
+            case .notAuthorized, .configurationFailed:
+                break
             }
         }
         
@@ -1835,7 +1833,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 }
 
                 let scored = (filtered.isEmpty ? candidates : filtered).sorted { a, b in
-                    scoreCandidate(a) > scoreCandidate(b)
+                    self.scoreCandidate(a) > self.scoreCandidate(b)
                 }
                 let keepCount = min(6, scored.count)
                 let selected = Array(scored.prefix(keepCount))
@@ -2051,14 +2049,14 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
 
         let landmarks = convertLandmarks(allPoints, faceBoundingBox: face.boundingBox)
-        let mouthOpen = face.landmarks?.outerLips.flatMap {
-            let mouthPoints = convertLandmarks($0, faceBoundingBox: face.boundingBox)
-            guard let minY = mouthPoints.map({ $0.y }).min(),
-                  let maxY = mouthPoints.map({ $0.y }).max() else {
-                return nil
+        var mouthOpen: Float?
+        if let outerLips = face.landmarks?.outerLips {
+            let mouthPoints = convertLandmarks(outerLips, faceBoundingBox: face.boundingBox)
+            if let minY = mouthPoints.map({ $0.y }).min(),
+               let maxY = mouthPoints.map({ $0.y }).max() {
+                let height = max(face.boundingBox.height, CGFloat(1e-6))
+                mouthOpen = Float((maxY - minY) / height)
             }
-            let height = max(face.boundingBox.height, 1e-6)
-            return Float((maxY - minY) / height)
         }
         return FaceAnalysis(landmarks: landmarks,
                             yaw: face.yaw?.floatValue,
