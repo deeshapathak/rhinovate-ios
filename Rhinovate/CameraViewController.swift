@@ -1768,14 +1768,22 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                     return
                 }
 
-                guard let data = data,
-                      let httpResponse = response as? HTTPURLResponse,
-                      (200...299).contains(httpResponse.statusCode) else {
-                    completion(.failure(UploadError.invalidResponse))
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    completion(.failure(UploadError.serverError(self.describeServerResponse(response, data))))
                     return
                 }
 
-                let payload = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any]
+                let body = data ?? Data()
+                if !(200...299).contains(httpResponse.statusCode) {
+                    completion(.failure(UploadError.serverError(self.describeServerResponse(response, body))))
+                    return
+                }
+
+                let payload = (try? JSONSerialization.jsonObject(with: body, options: [])) as? [String: Any]
+                if payload == nil {
+                    completion(.failure(UploadError.serverError(self.describeServerResponse(response, body))))
+                    return
+                }
                 let status = ((payload?["state"] as? String) ?? (payload?["status"] as? String))?.lowercased() ?? "unknown"
                 if let stage = payload?["stage"] as? String, status == "processing" {
                     self.setCaptureButton(title: "Processing: \(stage.capitalized)", isEnabled: false)
@@ -1851,24 +1859,24 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 return
             }
 
-            guard let httpResponse = response as? HTTPURLResponse,
-                  let responseData = responseData else {
-                completion(.failure(UploadError.invalidResponse))
+            guard let httpResponse = response as? HTTPURLResponse else {
+                completion(.failure(UploadError.serverError(self.describeServerResponse(response, responseData))))
                 return
             }
 
+            let body = responseData ?? Data()
+
             if !(200...299).contains(httpResponse.statusCode) {
-                let message = String(data: responseData, encoding: .utf8) ?? "Server error."
-                completion(.failure(UploadError.serverError(message)))
+                completion(.failure(UploadError.serverError(self.describeServerResponse(response, body))))
                 return
             }
 
             do {
-                let payload = try JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+                let payload = try JSONSerialization.jsonObject(with: body, options: []) as? [String: Any]
                 if let scanId = payload?["scanId"] as? String {
                     completion(.success(scanId))
                 } else {
-                    completion(.failure(UploadError.invalidResponse))
+                    completion(.failure(UploadError.serverError(self.describeServerResponse(response, body))))
                 }
             } catch {
                 completion(.failure(error))
@@ -1908,6 +1916,18 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             alertController.addAction(UIAlertAction(title: "OK", style: .default, handler: nil))
             self.present(alertController, animated: true, completion: nil)
         }
+    }
+
+    private func describeServerResponse(_ response: URLResponse?, _ data: Data?) -> String {
+        let status = (response as? HTTPURLResponse)?.statusCode
+        let statusText = status.map { "HTTP \($0)" } ?? "HTTP unavailable"
+        let bodyText = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let trimmed = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "Invalid server response (\(statusText))."
+        }
+        let snippet = String(trimmed.prefix(400))
+        return "Server response (\(statusText)): \(snippet)"
     }
     
 }
