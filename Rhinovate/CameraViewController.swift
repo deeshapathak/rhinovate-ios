@@ -11,6 +11,7 @@ import CoreVideo
 import MobileCoreServices
 import Accelerate
 import Photos  // luozc
+import Vision
 
 private enum SessionSetupResult: Sendable {
     case success
@@ -21,6 +22,21 @@ private enum SessionSetupResult: Sendable {
 private struct ScanResponse: Sendable {
     let scanId: String
     let glbUrl: String
+}
+
+private struct FaceAnalysis {
+    let landmarks: [CGPoint]
+    let yaw: Float?
+    let mouthOpenRatio: Float?
+}
+
+private struct FrameCandidate {
+    let points: [String]
+    let pointCount: Int
+    let depthValidRatio: Float
+    let yaw: Float?
+    let mouthOpenRatio: Float?
+    let landmarkRMS: Float?
 }
 
 // lzchao
@@ -1738,8 +1754,18 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         let colorScaleX = Float(colorWidth) / Float(depthWidth)
         let colorScaleY = Float(colorHeight) / Float(depthHeight)
 
+        let centerX = 0.5 * Float(depthWidth)
+        let centerY = 0.45 * Float(depthHeight)
+        let radiusX = 0.32 * Float(depthWidth)
+        let radiusY = 0.38 * Float(depthHeight)
+
         for y in Swift.stride(from: 0, to: depthHeight, by: strideStep) {
             for x in Swift.stride(from: 0, to: depthWidth, by: strideStep) {
+                let dx = (Float(x) - centerX) / radiusX
+                let dy = (Float(y) - centerY) / radiusY
+                if (dx * dx + dy * dy) > 1.0 {
+                    continue
+                }
                 let depth = depthBuffer[y * depthWidth + x]
                 if !depth.isFinite || depth <= 0 {
                     continue
@@ -1787,15 +1813,43 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                                       maxPoints: Int,
                                       completion: @escaping (Result<Data, Error>) -> Void) {
         processingQueue.async {
-            var points: [String] = []
+            var candidates: [FrameCandidate] = []
+            var referenceLandmarks: [CGPoint]?
             let endTime = Date().addingTimeInterval(duration)
-            var sawFrame = false
 
             func finalize() {
-                guard sawFrame else {
+                guard !candidates.isEmpty else {
                     completion(.failure(CaptureError.noFrames))
                     return
                 }
+
+                let filtered = candidates.filter { candidate in
+                    let yawOk = candidate.yaw.map { abs($0) < 0.7 } ?? true
+                    let mouthOk = candidate.mouthOpenRatio.map { $0 < 0.08 } ?? true
+                    let lmkOk = candidate.landmarkRMS.map { $0 < 0.05 } ?? true
+                    return candidate.pointCount >= 8000
+                        && candidate.depthValidRatio >= 0.05
+                        && yawOk
+                        && mouthOk
+                        && lmkOk
+                }
+
+                let scored = (filtered.isEmpty ? candidates : filtered).sorted { a, b in
+                    scoreCandidate(a) > scoreCandidate(b)
+                }
+                let keepCount = min(6, scored.count)
+                let selected = Array(scored.prefix(keepCount))
+
+                var points: [String] = []
+                for candidate in selected {
+                    for point in candidate.points {
+                        if points.count >= maxPoints {
+                            break
+                        }
+                        points.append(point)
+                    }
+                }
+
                 guard points.count >= 1000 else {
                     completion(.failure(CaptureError.sparsePoints(points.count)))
                     return
@@ -1808,22 +1862,19 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             }
 
             func sampleNext() {
-                if Date() >= endTime || points.count >= maxPoints {
+                if Date() >= endTime {
                     finalize()
                     return
                 }
 
-                var appended = false
-                if self.appendPLYPointsFromLatest(strideStep: strideStep,
-                                                  into: &points,
-                                                  maxPoints: maxPoints) {
-                    appended = true
-                    sawFrame = true
-                    self.lastPointCount = points.count
+                if let candidate = self.captureFrameCandidate(strideStep: strideStep,
+                                                              maxPoints: maxPoints,
+                                                              referenceLandmarks: &referenceLandmarks) {
+                    candidates.append(candidate)
+                    self.lastPointCount = candidate.pointCount
                 }
 
-                let delay = appended ? interval : interval * 0.5
-                DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                DispatchQueue.global().asyncAfter(deadline: .now() + interval) {
                     self.processingQueue.async {
                         sampleNext()
                     }
@@ -1832,6 +1883,208 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 
             sampleNext()
         }
+    }
+
+    private func scoreCandidate(_ candidate: FrameCandidate) -> Float {
+        var score = candidate.depthValidRatio * 2.0
+        score += min(Float(candidate.pointCount) / 50_000.0, 1.0)
+        if let rms = candidate.landmarkRMS {
+            score -= rms * 2.0
+        }
+        if let mouth = candidate.mouthOpenRatio {
+            score -= mouth * 3.0
+        }
+        if let yaw = candidate.yaw {
+            score -= abs(yaw) * 0.2
+        }
+        return score
+    }
+
+    private func captureFrameCandidate(strideStep: Int,
+                                       maxPoints: Int,
+                                       referenceLandmarks: inout [CGPoint]?) -> FrameCandidate? {
+        var depthData: AVDepthData?
+        var colorBuffer: CVPixelBuffer?
+        latestFrameQueue.sync {
+            depthData = latestDepthData
+            colorBuffer = latestColorBuffer
+        }
+        guard let depthData, let colorBuffer else {
+            return nil
+        }
+
+        guard let frame = buildFramePoints(depthData: depthData,
+                                           colorBuffer: colorBuffer,
+                                           strideStep: strideStep,
+                                           maxPoints: maxPoints) else {
+            return nil
+        }
+
+        let analysis = analyzeFace(in: colorBuffer)
+        let landmarks = analysis?.landmarks ?? []
+        if referenceLandmarks == nil, !landmarks.isEmpty {
+            referenceLandmarks = landmarks
+        }
+        let landmarkRMS = referenceLandmarks.flatMap { ref in
+            computeLandmarkRMS(current: landmarks, reference: ref)
+        }
+
+        return FrameCandidate(points: frame.points,
+                              pointCount: frame.points.count,
+                              depthValidRatio: frame.depthValidRatio,
+                              yaw: analysis?.yaw,
+                              mouthOpenRatio: analysis?.mouthOpenRatio,
+                              landmarkRMS: landmarkRMS)
+    }
+
+    private func buildFramePoints(depthData: AVDepthData,
+                                  colorBuffer: CVPixelBuffer,
+                                  strideStep: Int,
+                                  maxPoints: Int) -> (points: [String], depthValidRatio: Float)? {
+        guard let calibration = depthData.cameraCalibrationData else {
+            return nil
+        }
+
+        let depthMap = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32).depthDataMap
+        let depthWidth = CVPixelBufferGetWidth(depthMap)
+        let depthHeight = CVPixelBufferGetHeight(depthMap)
+        let colorWidth = CVPixelBufferGetWidth(colorBuffer)
+        let colorHeight = CVPixelBufferGetHeight(colorBuffer)
+
+        var intrinsics = calibration.intrinsicMatrix
+        let refSize = calibration.intrinsicMatrixReferenceDimensions
+        let scaleX = Float(refSize.width) / Float(depthWidth)
+        let scaleY = Float(refSize.height) / Float(depthHeight)
+        intrinsics.columns.0.x /= scaleX
+        intrinsics.columns.1.y /= scaleY
+        intrinsics.columns.2.x /= scaleX
+        intrinsics.columns.2.y /= scaleY
+
+        let fx = intrinsics.columns.0.x
+        let fy = intrinsics.columns.1.y
+        let cx = intrinsics.columns.2.x
+        let cy = intrinsics.columns.2.y
+
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        CVPixelBufferLockBaseAddress(colorBuffer, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(colorBuffer, .readOnly)
+            CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
+        }
+
+        guard let depthBaseAddress = CVPixelBufferGetBaseAddress(depthMap),
+              let colorBaseAddress = CVPixelBufferGetBaseAddress(colorBuffer) else {
+            return nil
+        }
+
+        let depthBuffer = depthBaseAddress.assumingMemoryBound(to: Float.self)
+        let colorBytesPerRow = CVPixelBufferGetBytesPerRow(colorBuffer)
+        let colorBufferPtr = colorBaseAddress.assumingMemoryBound(to: UInt8.self)
+
+        var vertices: [String] = []
+        vertices.reserveCapacity((depthWidth / strideStep) * (depthHeight / strideStep))
+
+        let colorScaleX = Float(colorWidth) / Float(depthWidth)
+        let colorScaleY = Float(colorHeight) / Float(depthHeight)
+
+        let centerX = 0.5 * Float(depthWidth)
+        let centerY = 0.45 * Float(depthHeight)
+        let radiusX = 0.32 * Float(depthWidth)
+        let radiusY = 0.38 * Float(depthHeight)
+
+        var totalSamples = 0
+        var validSamples = 0
+
+        for y in Swift.stride(from: 0, to: depthHeight, by: strideStep) {
+            for x in Swift.stride(from: 0, to: depthWidth, by: strideStep) {
+                if vertices.count >= maxPoints {
+                    break
+                }
+                let dx = (Float(x) - centerX) / radiusX
+                let dy = (Float(y) - centerY) / radiusY
+                if (dx * dx + dy * dy) > 1.0 {
+                    continue
+                }
+                totalSamples += 1
+                let depth = depthBuffer[y * depthWidth + x]
+                if !depth.isFinite || depth <= 0 {
+                    continue
+                }
+                validSamples += 1
+
+                let xf = (Float(x) - cx) / fx * depth
+                let yf = (Float(y) - cy) / fy * depth
+                let zf = depth
+
+                let colorX = min(max(Int(Float(x) * colorScaleX), 0), colorWidth - 1)
+                let colorY = min(max(Int(Float(y) * colorScaleY), 0), colorHeight - 1)
+                let colorOffset = colorY * colorBytesPerRow + colorX * 4
+
+                let b = colorBufferPtr[colorOffset]
+                let g = colorBufferPtr[colorOffset + 1]
+                let r = colorBufferPtr[colorOffset + 2]
+
+                vertices.append("\(xf) \(yf) \(zf) \(r) \(g) \(b)")
+            }
+        }
+
+        guard totalSamples > 0 else {
+            return nil
+        }
+        let ratio = Float(validSamples) / Float(totalSamples)
+        return (vertices, ratio)
+    }
+
+    private func analyzeFace(in colorBuffer: CVPixelBuffer) -> FaceAnalysis? {
+        let request = VNDetectFaceLandmarksRequest()
+        let handler = VNImageRequestHandler(cvPixelBuffer: colorBuffer,
+                                            orientation: .rightMirrored,
+                                            options: [:])
+        do {
+            try handler.perform([request])
+        } catch {
+            return nil
+        }
+        guard let face = request.results?.first as? VNFaceObservation,
+              let allPoints = face.landmarks?.allPoints else {
+            return nil
+        }
+
+        let landmarks = convertLandmarks(allPoints, faceBoundingBox: face.boundingBox)
+        let mouthOpen = face.landmarks?.outerLips.flatMap {
+            let mouthPoints = convertLandmarks($0, faceBoundingBox: face.boundingBox)
+            guard let minY = mouthPoints.map({ $0.y }).min(),
+                  let maxY = mouthPoints.map({ $0.y }).max() else {
+                return nil
+            }
+            let height = max(face.boundingBox.height, 1e-6)
+            return Float((maxY - minY) / height)
+        }
+        return FaceAnalysis(landmarks: landmarks,
+                            yaw: face.yaw?.floatValue,
+                            mouthOpenRatio: mouthOpen)
+    }
+
+    private func convertLandmarks(_ region: VNFaceLandmarkRegion2D,
+                                  faceBoundingBox: CGRect) -> [CGPoint] {
+        return region.normalizedPoints.map { point in
+            CGPoint(x: faceBoundingBox.origin.x + CGFloat(point.x) * faceBoundingBox.size.width,
+                    y: faceBoundingBox.origin.y + CGFloat(point.y) * faceBoundingBox.size.height)
+        }
+    }
+
+    private func computeLandmarkRMS(current: [CGPoint], reference: [CGPoint]) -> Float? {
+        guard !current.isEmpty, !reference.isEmpty else {
+            return nil
+        }
+        let count = min(current.count, reference.count)
+        var sum: CGFloat = 0
+        for idx in 0..<count {
+            let dx = current[idx].x - reference[idx].x
+            let dy = current[idx].y - reference[idx].y
+            sum += dx * dx + dy * dy
+        }
+        return Float(sqrt(sum / CGFloat(count)))
     }
 
     private func buildPLYData(from points: [String]) -> Data? {
