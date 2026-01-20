@@ -837,6 +837,12 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             self.setupResult = result
         }
     }
+
+    private func failConfiguration(_ message: String) {
+        print("Session configuration failed: \(message)")
+        setSetupResult(.configurationFailed)
+        showTrueDepthStatus(message: message)
+    }
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
@@ -1029,18 +1035,17 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
         
         let defaultVideoDevice: AVCaptureDevice? = videoDeviceDiscoverySession.devices.first
+            ?? AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front)
         
         guard let videoDevice = defaultVideoDevice else {
-            print("Could not find any video device")
-            setSetupResult(.configurationFailed)
+            failConfiguration("TrueDepth camera not found. Ensure this is a TrueDepth device and no other camera apps are open.")
             return
         }
         
         do {
             videoDeviceInput = try AVCaptureDeviceInput(device: videoDevice)
         } catch {
-            print("Could not create video device input: \(error)")
-            setSetupResult(.configurationFailed)
+            failConfiguration("Failed to create TrueDepth camera input: \(error.localizedDescription)")
             return
         }
         
@@ -1051,8 +1056,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         
         // Add a video input
         guard session.canAddInput(videoDeviceInput) else {
-            print("Could not add video device input to the session")
-            setSetupResult(.configurationFailed)
+            failConfiguration("Could not add TrueDepth camera input to the session.")
             session.commitConfiguration()
             return
         }
@@ -1063,8 +1067,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             session.addOutput(videoDataOutput)
             videoDataOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)]
         } else {
-            print("Could not add video data output to the session")
-            setSetupResult(.configurationFailed)
+            failConfiguration("Could not attach video output. The camera may be in use.")
             session.commitConfiguration()
             return
         }
@@ -1076,11 +1079,10 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             if let connection = depthDataOutput.connection(with: .depthData) {
                 connection.isEnabled = true
             } else {
-                print("No AVCaptureConnection")
+                failConfiguration("Depth output connection not available.")
             }
         } else {
-            print("Could not add depth data output to the session")
-            setSetupResult(.configurationFailed)
+            failConfiguration("Could not attach depth output. TrueDepth may be unavailable.")
             session.commitConfiguration()
             return
         }
@@ -1093,14 +1095,19 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         let selectedFormat = filtered.max(by: {
             first, second in CMVideoFormatDescriptionGetDimensions(first.formatDescription).width < CMVideoFormatDescriptionGetDimensions(second.formatDescription).width
         })
+
+        guard let depthFormat = selectedFormat else {
+            failConfiguration("No supported depth formats found for TrueDepth.")
+            session.commitConfiguration()
+            return
+        }
         
         do {
             try videoDevice.lockForConfiguration()
-            videoDevice.activeDepthDataFormat = selectedFormat
+            videoDevice.activeDepthDataFormat = depthFormat
             videoDevice.unlockForConfiguration()
         } catch {
-            print("Could not lock device for configuration: \(error)")
-            setSetupResult(.configurationFailed)
+            failConfiguration("Unable to set depth format: \(error.localizedDescription)")
             session.commitConfiguration()
             return
         }
