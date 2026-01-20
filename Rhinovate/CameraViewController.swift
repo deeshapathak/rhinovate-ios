@@ -184,6 +184,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var trueDepthStatusLabel: UILabel?
     private var depthHealthTimer: Timer?
     private var lastDepthFrameAt: Date?
+    private var depthHealthStartAt: Date?
     private var scanStartTime: Date?
     private var scanDuration: TimeInterval = 5.0
     private var scanTimer: Timer?
@@ -559,6 +560,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 
     private func startDepthHealthTimer() {
         depthHealthTimer?.invalidate()
+        depthHealthStartAt = Date()
         depthHealthTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.updateDepthHealth()
         }
@@ -567,13 +569,19 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private func stopDepthHealthTimer() {
         depthHealthTimer?.invalidate()
         depthHealthTimer = nil
+        depthHealthStartAt = nil
     }
 
     private func updateDepthHealth() {
         let now = Date()
-        let stale = lastDepthFrameAt.map { now.timeIntervalSince($0) > 1.5 } ?? true
+        if let start = depthHealthStartAt, now.timeIntervalSince(start) < 3.0 {
+            hideTrueDepthStatus()
+            return
+        }
+
+        let stale = lastDepthFrameAt.map { now.timeIntervalSince($0) > 3.0 } ?? true
         let noDepth = lastDepthPixelCount == 0 || lastValidDepthCount == 0
-        let depthTooLow = depthLowStreak >= 8
+        let depthTooLow = depthLowStreak >= 15
 
         if stale || noDepth || depthTooLow {
             showTrueDepthStatus(message: "TrueDepth inactive. Close other camera apps, restart the app, and ensure good lighting.")
