@@ -185,6 +185,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var depthHealthTimer: Timer?
     private var lastDepthFrameAt: Date?
     private var depthHealthStartAt: Date?
+    private var hasSeenDepthFrame = false
     private var scanStartTime: Date?
     private var scanDuration: TimeInterval = 5.0
     private var scanTimer: Timer?
@@ -570,6 +571,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         depthHealthTimer?.invalidate()
         depthHealthTimer = nil
         depthHealthStartAt = nil
+        hasSeenDepthFrame = false
     }
 
     private func updateDepthHealth() {
@@ -579,12 +581,30 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             return
         }
 
-        let stale = lastDepthFrameAt.map { now.timeIntervalSince($0) > 3.0 } ?? true
+        if !hasSeenDepthFrame {
+            if let start = depthHealthStartAt, now.timeIntervalSince(start) < 5.0 {
+                hideTrueDepthStatus()
+                return
+            }
+            showTrueDepthStatus(message: "TrueDepth inactive: no depth frames received yet.")
+            return
+        }
+
+        let ageSeconds = lastDepthFrameAt.map { now.timeIntervalSince($0) } ?? Double.greatestFiniteMagnitude
+        let stale = ageSeconds > 3.0
         let noDepth = lastDepthPixelCount == 0 || lastValidDepthCount == 0
         let depthTooLow = depthLowStreak >= 15
+        let ratio = lastDepthPixelCount > 0 ? Float(lastValidDepthCount) / Float(lastDepthPixelCount) : 0
+        let ratioPercent = Int(ratio * 100)
+
+        if !session.isRunning {
+            showTrueDepthStatus(message: "TrueDepth inactive: capture session stopped.")
+            return
+        }
 
         if stale || noDepth || depthTooLow {
-            showTrueDepthStatus(message: "TrueDepth inactive. Close other camera apps, restart the app, and ensure good lighting.")
+            let ageText = ageSeconds.isFinite ? String(format: "%.1fs", ageSeconds) : "--"
+            showTrueDepthStatus(message: "TrueDepth inactive (age \(ageText), depth \(ratioPercent)%). Close other camera apps, restart the app, and ensure good lighting.")
         } else {
             hideTrueDepthStatus()
         }
@@ -1503,6 +1523,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             latestDepthData = depthData
             latestColorBuffer = videoPixelBuffer
             lastDepthFrameAt = Date()
+            hasSeenDepthFrame = true
         }
         
 // luozc
