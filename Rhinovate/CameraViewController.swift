@@ -181,6 +181,9 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var guidanceProgress: UIProgressView?
     private var guidanceDistanceLabel: UILabel?
     private var guidanceQualityLabel: UILabel?
+    private var trueDepthStatusLabel: UILabel?
+    private var depthHealthTimer: Timer?
+    private var lastDepthFrameAt: Date?
     private var scanStartTime: Date?
     private var scanDuration: TimeInterval = 5.0
     private var scanTimer: Timer?
@@ -261,6 +264,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         
         setupCaptureButton()
         setupGuidanceOverlay()
+        setupTrueDepthHealthOverlay()
         
         JETEnabled = false
         cloudToJETSegCtrl.selectedSegmentIndex = 1
@@ -523,6 +527,72 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         guidanceProgress = progress
         guidanceDistanceLabel = distance
         guidanceQualityLabel = quality
+    }
+
+    private func setupTrueDepthHealthOverlay() {
+        if trueDepthStatusLabel != nil {
+            return
+        }
+
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.backgroundColor = UIColor.systemRed.withAlphaComponent(0.85)
+        label.textColor = .white
+        label.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.layer.cornerRadius = 8
+        label.layer.masksToBounds = true
+        label.isHidden = true
+
+        view.addSubview(label)
+
+        let topAnchor = guidanceContainer?.bottomAnchor ?? view.safeAreaLayoutGuide.topAnchor
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+        ])
+
+        trueDepthStatusLabel = label
+    }
+
+    private func startDepthHealthTimer() {
+        depthHealthTimer?.invalidate()
+        depthHealthTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateDepthHealth()
+        }
+    }
+
+    private func stopDepthHealthTimer() {
+        depthHealthTimer?.invalidate()
+        depthHealthTimer = nil
+    }
+
+    private func updateDepthHealth() {
+        let now = Date()
+        let stale = lastDepthFrameAt.map { now.timeIntervalSince($0) > 1.5 } ?? true
+        let noDepth = lastDepthPixelCount == 0 || lastValidDepthCount == 0
+        let depthTooLow = depthLowStreak >= 8
+
+        if stale || noDepth || depthTooLow {
+            showTrueDepthStatus(message: "TrueDepth inactive. Close other camera apps, restart the app, and ensure good lighting.")
+        } else {
+            hideTrueDepthStatus()
+        }
+    }
+
+    private func showTrueDepthStatus(message: String) {
+        DispatchQueue.main.async {
+            self.trueDepthStatusLabel?.text = message
+            self.trueDepthStatusLabel?.isHidden = false
+        }
+    }
+
+    private func hideTrueDepthStatus() {
+        DispatchQueue.main.async {
+            self.trueDepthStatusLabel?.isHidden = true
+        }
     }
 
     private func startGuidanceTimer() {
@@ -816,9 +886,11 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 }
             }
         }
+        startDepthHealthTimer()
     }
     
     override func viewWillDisappear(_ animated: Bool) {
+        stopDepthHealthTimer()
         dataOutputQueue.async {
             self.renderingEnabled = false
         }
@@ -1148,6 +1220,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         
         let error = AVError(_nsError: errorValue)
         print("Capture session runtime error: \(error)")
+        showTrueDepthStatus(message: "Camera service error. Close other camera apps and relaunch Rhinovate.")
         
         /*
          Automatically try to restart the session running if media services were
@@ -1414,6 +1487,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         latestFrameQueue.sync {
             latestDepthData = depthData
             latestColorBuffer = videoPixelBuffer
+            lastDepthFrameAt = Date()
         }
         
 // luozc
