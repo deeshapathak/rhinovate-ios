@@ -78,31 +78,31 @@ private enum CapturePose: Int, CaseIterable {
     
     var targetYaw: ClosedRange<Float> {
         switch self {
-        case .front: return -5...5
-        case .left: return -105...(-75)
-        case .right: return 75...105
-        case .down: return -10...10
-        case .up: return -10...10
+        case .front: return -10...10  // More lenient for front pose
+        case .left: return -110...(-70)  // Wider range for side profiles
+        case .right: return 70...110
+        case .down: return -15...15  // Allow slight head movement
+        case .up: return -15...15
         }
     }
     
     var targetPitch: ClosedRange<Float> {
         switch self {
-        case .front: return -5...5
-        case .left: return -10...10
-        case .right: return -10...10
-        case .down: return -40...(-20)
-        case .up: return 20...40
+        case .front: return -10...10  // More lenient
+        case .left: return -15...15  // Side profiles can look slightly up/down
+        case .right: return -15...15
+        case .down: return -45...(-15)  // Wider range for looking down
+        case .up: return 15...45  // Wider range for looking up
         }
     }
     
     var targetRoll: ClosedRange<Float> {
         switch self {
-        case .front: return -5...5
-        case .left: return -10...10
-        case .right: return -10...10
-        case .down: return -10...10
-        case .up: return -10...10
+        case .front: return -20...20  // More lenient for natural head tilt
+        case .left: return -25...25  // Side profiles can have more tilt
+        case .right: return -25...25
+        case .down: return -20...20
+        case .up: return -20...20
         }
     }
 }
@@ -551,38 +551,94 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             return false
         }
         
-        return pose.targetYaw.contains(yaw) &&
-               pose.targetPitch.contains(pitch) &&
-               pose.targetRoll.contains(roll) &&
-               frame.landmarks.count >= 400  // Minimum landmarks
+        // Require minimum landmarks
+        guard frame.landmarks.count >= 300 else {
+            return false
+        }
+        
+        // For front pose, be more lenient - allow if 2 out of 3 angles are good
+        if pose == .front {
+            let yawOk = pose.targetYaw.contains(yaw)
+            let pitchOk = pose.targetPitch.contains(pitch)
+            let rollOk = pose.targetRoll.contains(roll)
+            // Require yaw to be good (most important), and at least one other
+            return yawOk && (pitchOk || rollOk)
+        }
+        
+        // For other poses, require yaw and pitch to be good, roll is less critical
+        let yawOk = pose.targetYaw.contains(yaw)
+        let pitchOk = pose.targetPitch.contains(pitch)
+        let rollOk = pose.targetRoll.contains(roll)
+        
+        // Yaw is most important, pitch second, roll is least critical
+        if pose == .left || pose == .right {
+            return yawOk && pitchOk  // Don't require roll for side profiles
+        }
+        
+        // For up/down, require pitch and yaw
+        return yawOk && pitchOk
     }
     
     private func getPoseFeedback(frame: CapturedFrame, pose: CapturePose) -> String {
         var feedback: [String] = []
         
+        // Only show feedback for critical angles (yaw and pitch)
+        // Roll feedback is less important and can be annoying
+        
         if let yaw = frame.yaw {
             if !pose.targetYaw.contains(yaw) {
-                if yaw < pose.targetYaw.lowerBound {
-                    feedback.append("Turn more \(pose == .left ? "left" : "right")")
-                } else {
-                    feedback.append("Turn less")
+                if pose == .front {
+                    if yaw < pose.targetYaw.lowerBound {
+                        feedback.append("Turn right slightly")
+                    } else {
+                        feedback.append("Turn left slightly")
+                    }
+                } else if pose == .left {
+                    if yaw > pose.targetYaw.upperBound {
+                        feedback.append("Turn left more")
+                    } else if yaw < pose.targetYaw.lowerBound {
+                        feedback.append("Turn right slightly")
+                    }
+                } else if pose == .right {
+                    if yaw < pose.targetYaw.lowerBound {
+                        feedback.append("Turn right more")
+                    } else if yaw > pose.targetYaw.upperBound {
+                        feedback.append("Turn left slightly")
+                    }
                 }
             }
         }
         
         if let pitch = frame.pitch {
             if !pose.targetPitch.contains(pitch) {
-                if pitch < pose.targetPitch.lowerBound {
-                    feedback.append("Look down more")
-                } else {
-                    feedback.append("Look up more")
+                if pose == .down {
+                    if pitch > pose.targetPitch.upperBound {
+                        feedback.append("Look down more")
+                    } else {
+                        feedback.append("Look up slightly")
+                    }
+                } else if pose == .up {
+                    if pitch < pose.targetPitch.lowerBound {
+                        feedback.append("Look up more")
+                    } else {
+                        feedback.append("Look down slightly")
+                    }
+                } else if pose == .front {
+                    if pitch < pose.targetPitch.lowerBound {
+                        feedback.append("Look up slightly")
+                    } else {
+                        feedback.append("Look down slightly")
+                    }
                 }
             }
         }
         
-        if let roll = frame.roll {
-            if !pose.targetRoll.contains(roll) {
-                feedback.append("Straighten your head")
+        // Only show roll feedback if it's really off (more than 30 degrees)
+        if let roll = frame.roll, abs(roll) > 30 {
+            if roll < 0 {
+                feedback.append("Tilt head right")
+            } else {
+                feedback.append("Tilt head left")
             }
         }
         
