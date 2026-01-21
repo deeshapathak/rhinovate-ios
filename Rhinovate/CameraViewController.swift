@@ -27,6 +27,7 @@ private struct ScanResponse: Sendable {
 private struct FaceAnalysis {
     let landmarks: [CGPoint]
     let yawDegrees: Float?
+    let pitchDegrees: Float?
     let rollDegrees: Float?
     let mouthOpenRatio: Float?
     let interocular: Float?
@@ -46,6 +47,75 @@ private struct FrameCandidate {
     let deltaPose: Float?
     let deltaLandmarks: Float?
     let deltaCentroid: Float?
+}
+
+private enum CapturePose: Int, CaseIterable {
+    case front = 0
+    case left = 1
+    case right = 2
+    case down = 3
+    case up = 4
+    
+    var name: String {
+        switch self {
+        case .front: return "Front"
+        case .left: return "Left Profile"
+        case .right: return "Right Profile"
+        case .down: return "Looking Down"
+        case .up: return "Looking Up"
+        }
+    }
+    
+    var instruction: String {
+        switch self {
+        case .front: return "Face forward, look straight ahead"
+        case .left: return "Turn your head slowly to the left ~90°"
+        case .right: return "Turn your head slowly to the right ~90°"
+        case .down: return "Look down ~30°, keep head straight"
+        case .up: return "Look up ~30°, keep head straight"
+        }
+    }
+    
+    var targetYaw: ClosedRange<Float> {
+        switch self {
+        case .front: return -5...5
+        case .left: return -105...(-75)
+        case .right: return 75...105
+        case .down: return -10...10
+        case .up: return -10...10
+        }
+    }
+    
+    var targetPitch: ClosedRange<Float> {
+        switch self {
+        case .front: return -5...5
+        case .left: return -10...10
+        case .right: return -10...10
+        case .down: return -40...(-20)
+        case .up: return 20...40
+        }
+    }
+    
+    var targetRoll: ClosedRange<Float> {
+        switch self {
+        case .front: return -5...5
+        case .left: return -10...10
+        case .right: return -10...10
+        case .down: return -10...10
+        case .up: return -10...10
+        }
+    }
+}
+
+private struct CapturedFrame {
+    let pose: CapturePose
+    let rgbImage: CVPixelBuffer
+    let depthData: AVDepthData
+    let timestamp: Date
+    let yaw: Float?
+    let pitch: Float?
+    let roll: Float?
+    let landmarks: [CGPoint]
 }
 
 // lzchao
@@ -223,6 +293,13 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var lastDepthPixelCount: Int = 0
     private var depthLowStreak: Int = 0
     
+    // Guided capture state
+    private var currentPose: CapturePose = .front
+    private var capturedFrames: [CapturedFrame] = []
+    private var poseValidationTimer: Timer?
+    private var validPoseDuration: TimeInterval = 0
+    private var isGuidedCaptureMode = false
+    
     private var renderingEnabled = true
     
     private var savingEnabled = false  // luozc
@@ -395,9 +472,293 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     }
 
     @objc private func capturePLY(_ sender: UIButton) {
-        setCaptureButton(title: "Hold still...", isEnabled: false)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            self.performCapture()
+        if isGuidedCaptureMode {
+            captureCurrentPose()
+        } else {
+            startGuidedCapture()
+        }
+    }
+    
+    private func startGuidedCapture() {
+        isGuidedCaptureMode = true
+        currentPose = .front
+        capturedFrames = []
+        validPoseDuration = 0
+        
+        updateUIForPose(currentPose)
+        startPoseValidationTimer()
+    }
+    
+    private func captureCurrentPose() {
+        guard let frame = captureCurrentFrame() else {
+            presentSimpleAlert(title: "Capture Failed", message: "Unable to capture frame. Please try again.")
+            return
+        }
+        
+        guard isValidPose(frame: frame, pose: currentPose) else {
+            presentSimpleAlert(title: "Invalid Pose", 
+                              message: "Please adjust: \(getPoseFeedback(frame: frame, pose: currentPose))")
+            return
+        }
+        
+        capturedFrames.append(frame)
+        hapticGenerator?.impactOccurred()
+        
+        if currentPose == .up {
+            // All poses captured - proceed with upload
+            completeGuidedCapture()
+        } else {
+            // Move to next pose
+            currentPose = CapturePose(rawValue: currentPose.rawValue + 1)!
+            updateUIForPose(currentPose)
+            validPoseDuration = 0
+        }
+    }
+    
+    private func captureCurrentFrame() -> CapturedFrame? {
+        var depthData: AVDepthData?
+        var colorBuffer: CVPixelBuffer?
+        latestFrameQueue.sync {
+            depthData = latestDepthData
+            colorBuffer = latestColorBuffer
+        }
+        
+        guard let depthData, let colorBuffer else {
+            return nil
+        }
+        
+        // Note: colorBuffer is already retained by latestFrameQueue, we'll copy it if needed
+        
+        let analysis = analyzeFace(in: colorBuffer)
+        let landmarks = analysis?.landmarks ?? []
+        
+        return CapturedFrame(
+            pose: currentPose,
+            rgbImage: colorBuffer,
+            depthData: depthData,
+            timestamp: Date(),
+            yaw: analysis?.yawDegrees,
+            pitch: analysis?.pitchDegrees,
+            roll: analysis?.rollDegrees,
+            landmarks: landmarks
+        )
+    }
+    
+    private func isValidPose(frame: CapturedFrame, pose: CapturePose) -> Bool {
+        guard let yaw = frame.yaw,
+              let pitch = frame.pitch,
+              let roll = frame.roll else {
+            return false
+        }
+        
+        return pose.targetYaw.contains(yaw) &&
+               pose.targetPitch.contains(pitch) &&
+               pose.targetRoll.contains(roll) &&
+               frame.landmarks.count >= 400  // Minimum landmarks
+    }
+    
+    private func getPoseFeedback(frame: CapturedFrame, pose: CapturePose) -> String {
+        var feedback: [String] = []
+        
+        if let yaw = frame.yaw {
+            if !pose.targetYaw.contains(yaw) {
+                if yaw < pose.targetYaw.lowerBound {
+                    feedback.append("Turn more \(pose == .left ? "left" : "right")")
+                } else {
+                    feedback.append("Turn less")
+                }
+            }
+        }
+        
+        if let pitch = frame.pitch {
+            if !pose.targetPitch.contains(pitch) {
+                if pitch < pose.targetPitch.lowerBound {
+                    feedback.append("Look down more")
+                } else {
+                    feedback.append("Look up more")
+                }
+            }
+        }
+        
+        if let roll = frame.roll {
+            if !pose.targetRoll.contains(roll) {
+                feedback.append("Straighten your head")
+            }
+        }
+        
+        return feedback.isEmpty ? "Hold steady" : feedback.joined(separator: ", ")
+    }
+    
+    private func updateUIForPose(_ pose: CapturePose) {
+        DispatchQueue.main.async {
+            let progress = Float(pose.rawValue + 1) / Float(CapturePose.allCases.count)
+            self.guidanceProgress?.progress = progress
+            self.guidanceTitleLabel?.text = "Pose \(pose.rawValue + 1) of 5: \(pose.name)"
+            self.guidanceDetailLabel?.text = pose.instruction
+            self.setCaptureButton(title: "Capture \(pose.name)", isEnabled: true)
+            
+            // Update face frame color based on pose validity
+            self.updateFaceFrameColor()
+        }
+    }
+    
+    private func startPoseValidationTimer() {
+        poseValidationTimer?.invalidate()
+        poseValidationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.updatePoseValidation()
+        }
+    }
+    
+    private func stopPoseValidationTimer() {
+        poseValidationTimer?.invalidate()
+        poseValidationTimer = nil
+    }
+    
+    private func updatePoseValidation() {
+        guard isGuidedCaptureMode,
+              let frame = captureCurrentFrame() else {
+            return
+        }
+        
+        let isValid = isValidPose(frame: frame, pose: currentPose)
+        
+        if isValid {
+            validPoseDuration += 0.1
+            if validPoseDuration >= 1.0 {
+                // Auto-capture when valid for 1 second
+                DispatchQueue.main.async {
+                    self.captureCurrentPose()
+                }
+            }
+        } else {
+            validPoseDuration = 0
+        }
+        
+        DispatchQueue.main.async {
+            self.updateFaceFrameColor()
+            let feedback = self.getPoseFeedback(frame: frame, pose: self.currentPose)
+            if !isValid {
+                self.guidanceQualityLabel?.text = feedback
+            } else {
+                self.guidanceQualityLabel?.text = "Hold steady... (\(Int(self.validPoseDuration * 10) / 10)s)"
+            }
+        }
+    }
+    
+    private func updateFaceFrameColor() {
+        guard isGuidedCaptureMode else { return }
+        
+        let isValid = validPoseDuration >= 1.0
+        let color = isValid ? UIColor.systemGreen : UIColor.systemYellow
+        
+        DispatchQueue.main.async {
+            self.faceFrameView?.layer.borderColor = color.withAlphaComponent(0.8).cgColor
+        }
+    }
+    
+    private func completeGuidedCapture() {
+        stopPoseValidationTimer()
+        isGuidedCaptureMode = false
+        
+        setCaptureButton(title: "Preparing...", isEnabled: false)
+        
+        // Build PLY from all captured frames
+        processingQueue.async {
+            self.buildPLYFromCapturedFrames { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let plyData):
+                        self.setCaptureButton(title: "Uploading...", isEnabled: false)
+                        self.uploadPLYWithFrames(data: plyData, frames: self.capturedFrames) { uploadResult in
+                            DispatchQueue.main.async {
+                                self.handleUploadResult(uploadResult, plyData: plyData)
+                            }
+                        }
+                    case .failure(let error):
+                        self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                        self.presentSimpleAlert(title: "Capture Failed", message: error.localizedDescription)
+                    }
+                }
+            }
+        }
+    }
+    
+    private func buildPLYFromCapturedFrames(completion: @escaping (Result<Data, Error>) -> Void) {
+        var allPoints: [String] = []
+        var totalVertexCount = 0
+        
+        for frame in capturedFrames {
+            guard let framePoints = buildPLY(depthData: frame.depthData,
+                                            colorBuffer: frame.rgbImage,
+                                            strideStep: 4) else {
+                continue
+            }
+            
+            // Parse PLY points (simple string parsing)
+            let pointsString = String(data: framePoints, encoding: .utf8) ?? ""
+            let lines = pointsString.components(separatedBy: .newlines)
+            var inHeader = true
+            var vertexCount = 0
+            
+            for line in lines {
+                if line.hasPrefix("element vertex") {
+                    let parts = line.components(separatedBy: .whitespaces)
+                    if parts.count >= 3, let count = Int(parts[2]) {
+                        vertexCount = count
+                    }
+                    continue
+                }
+                if line.hasPrefix("end_header") {
+                    inHeader = false
+                    continue
+                }
+                if inHeader || line.isEmpty {
+                    continue
+                }
+                // Parse vertex line: "x y z r g b"
+                let parts = line.trimmingCharacters(in: .whitespaces).components(separatedBy: .whitespaces)
+                if parts.count >= 6 {
+                    allPoints.append(line)
+                    totalVertexCount += 1
+                }
+            }
+        }
+        
+        guard totalVertexCount >= 1000 else {
+            completion(.failure(CaptureError.sparsePoints(totalVertexCount)))
+            return
+        }
+        
+        if let plyData = buildPLYData(from: allPoints) {
+            completion(.success(plyData))
+        } else {
+            completion(.failure(CaptureError.insufficientPoints))
+        }
+    }
+    
+    private func handleUploadResult(_ result: Result<String, Error>, plyData: Data) {
+        switch result {
+        case .success(let scanId):
+            setCaptureButton(title: "Processing...", isEnabled: false)
+            pollScanStatus(scanId: scanId) { statusResult in
+                DispatchQueue.main.async {
+                    self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                    switch statusResult {
+                    case .success:
+                        self.presentSimpleAlert(title: "Scan Ready",
+                                              message: "Opening web app with scan.")
+                        self.openFrontend(scanId: scanId)
+                    case .failure(let error):
+                        self.presentSimpleAlert(title: "Scan Failed",
+                                              message: error.localizedDescription)
+                    }
+                }
+            }
+        case .failure(let error):
+            setCaptureButton(title: "Capture PLY", isEnabled: true)
+            let _ = savePLY(data: plyData)
+            presentSimpleAlert(title: "Upload Failed",
+                              message: "Saved PLY locally. Error: \(error.localizedDescription)")
         }
     }
 
@@ -2153,9 +2514,11 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             }
         }
         let yawDeg = face.yaw.map { Float(truncating: $0) * (180.0 / .pi) }
+        let pitchDeg = face.pitch.map { Float(truncating: $0) * (180.0 / .pi) }
         let rollDeg = face.roll.map { Float(truncating: $0) * (180.0 / .pi) }
         return FaceAnalysis(landmarks: landmarks,
                             yawDegrees: yawDeg,
+                            pitchDegrees: pitchDeg,
                             rollDegrees: rollDeg,
                             mouthOpenRatio: mouthOpen,
                             interocular: interocular,
@@ -2370,6 +2733,106 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         checkStatus()
     }
 
+    private func convertPixelBufferToJPEG(_ pixelBuffer: CVPixelBuffer, quality: CGFloat = 0.8) -> Data? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+        
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            return nil
+        }
+        
+        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .rightMirrored)
+        return uiImage.jpegData(compressionQuality: quality)
+    }
+    
+    private func uploadPLYWithFrames(data: Data, frames: [CapturedFrame], completion: @escaping (Result<String, Error>) -> Void) {
+        var components = URLComponents(string: "https://backend-for-rhinovate-ios-app-ply-to-glb.onrender.com/api/scans")
+        components?.queryItems = [
+            URLQueryItem(name: "unit_scale", value: "1.0"),
+            URLQueryItem(name: "units", value: "meters")
+        ]
+        guard let url = components?.url else {
+            completion(.failure(UploadError.invalidResponse))
+            return
+        }
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 300
+
+        var body = Data()
+        
+        // Add PLY file
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"ply\"; filename=\"scan.ply\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
+        body.append(data)
+        body.append("\r\n".data(using: .utf8)!)
+        
+        // Add RGB frames as JPEG images
+        let frameNames = ["front", "left", "right", "down", "up"]
+        for (index, frame) in frames.enumerated() {
+            guard index < frameNames.count,
+                  let jpegData = convertPixelBufferToJPEG(frame.rgbImage, quality: 0.85) else {
+                continue
+            }
+            
+            let fieldName = "image_\(frameNames[index])"
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"\(fieldName)\"; filename=\"\(fieldName).jpg\"\r\n".data(using: .utf8)!)
+            body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+            body.append(jpegData)
+            body.append("\r\n".data(using: .utf8)!)
+        }
+        
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+
+        let timeoutItem = DispatchWorkItem {
+            completion(.failure(UploadError.serverError("Upload timed out. Try Wi‑Fi or reduce scan size.")))
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 300, execute: timeoutItem)
+
+        let sessionConfig = URLSessionConfiguration.default
+        sessionConfig.waitsForConnectivity = true
+        sessionConfig.timeoutIntervalForRequest = 300
+        sessionConfig.timeoutIntervalForResource = 300
+        let session = URLSession(configuration: sessionConfig)
+
+        let task = session.uploadTask(with: request, from: body) { data, response, error in
+            timeoutItem.cancel()
+            
+            if let error = error {
+                completion(.failure(error))
+                return
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                completion(.failure(UploadError.serverError(self.describeServerResponse(response, data))))
+                return
+            }
+
+            let responseBody = data ?? Data()
+            if !(200...299).contains(httpResponse.statusCode) {
+                completion(.failure(UploadError.serverError(self.describeServerResponse(response, responseBody))))
+                return
+            }
+
+            do {
+                let payload = try JSONSerialization.jsonObject(with: responseBody, options: []) as? [String: Any]
+                if let scanId = payload?["scanId"] as? String {
+                    completion(.success(scanId))
+                } else {
+                    completion(.failure(UploadError.serverError(self.describeServerResponse(response, responseBody))))
+                }
+            } catch {
+                completion(.failure(error))
+            }
+        }
+        task.resume()
+    }
+    
     private func uploadPLY(data: Data, completion: @escaping (Result<String, Error>) -> Void) {
         var components = URLComponents(string: "https://backend-for-rhinovate-ios-app-ply-to-glb.onrender.com/api/scans")
         components?.queryItems = [
