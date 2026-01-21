@@ -507,7 +507,29 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 self.setCaptureButton(title: "Uploading...", isEnabled: false)
                 self.uploadPLYWithFrames(data: plyData, frames: frames) { uploadResult in
                     DispatchQueue.main.async {
-                        self.handleUploadResult(uploadResult, plyData: plyData)
+                        switch uploadResult {
+                        case .success(let scanId):
+                            self.setCaptureButton(title: "Processing...", isEnabled: false)
+                            self.pollScanStatus(scanId: scanId) { statusResult in
+                                DispatchQueue.main.async {
+                                    self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                                    switch statusResult {
+                                    case .success:
+                                        self.presentSimpleAlert(title: "Scan Ready",
+                                                              message: "Opening web app with scan.")
+                                        self.openFrontend(scanId: scanId)
+                                    case .failure(let error):
+                                        self.presentSimpleAlert(title: "Scan Failed",
+                                                              message: error.localizedDescription)
+                                    }
+                                }
+                            }
+                        case .failure(let error):
+                            self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                            let _ = self.savePLY(data: plyData)
+                            self.presentSimpleAlert(title: "Upload Failed",
+                                                  message: "Saved PLY locally. Error: \(error.localizedDescription)")
+                        }
                     }
                 }
             case .failure(let error):
@@ -1035,14 +1057,16 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         if let scene = view.window?.windowScene {
             if #available(iOS 26.0, *) {
                 return scene.effectiveGeometry.interfaceOrientation
+            } else {
+                return scene.interfaceOrientation
             }
-            return scene.interfaceOrientation
         }
         if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
             if #available(iOS 26.0, *) {
                 return scene.effectiveGeometry.interfaceOrientation
+            } else {
+                return scene.interfaceOrientation
             }
-            return scene.interfaceOrientation
         }
         return .portrait
     }
@@ -2015,9 +2039,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                     
                     if let depthData, let colorBuffer {
                         // Convert to JPEG immediately to avoid pixel buffer retention issues
-                        guard let jpegData = self.convertPixelBufferToJPEG(colorBuffer, quality: 0.85) else {
-                            continue
-                        }
+                        if let jpegData = self.convertPixelBufferToJPEG(colorBuffer, quality: 0.85) {
                         
                         let analysis = self.analyzeFace(in: colorBuffer)
                         let landmarks = analysis?.landmarks ?? []
@@ -2025,17 +2047,18 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                         // Determine pose type from angles
                         let pose = self.determinePoseFromAngles(yaw: analysis?.yawDegrees, pitch: analysis?.pitchDegrees)
                         
-                        let frame = CapturedFrame(
-                            pose: pose,
-                            rgbImageJPEG: jpegData,
-                            depthData: depthData,
-                            timestamp: Date(),
-                            yaw: analysis?.yawDegrees,
-                            pitch: analysis?.pitchDegrees,
-                            roll: analysis?.rollDegrees,
-                            landmarks: landmarks
-                        )
-                        rgbFrames.append(frame)
+                            let frame = CapturedFrame(
+                                pose: pose,
+                                rgbImageJPEG: jpegData,
+                                depthData: depthData,
+                                timestamp: Date(),
+                                yaw: analysis?.yawDegrees,
+                                pitch: analysis?.pitchDegrees,
+                                roll: analysis?.rollDegrees,
+                                landmarks: landmarks
+                            )
+                            rgbFrames.append(frame)
+                        }
                     }
                     
                     if candidate.depthValidRatio >= 0.1 && candidate.pointCount >= 10000 {
