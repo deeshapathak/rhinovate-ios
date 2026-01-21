@@ -109,7 +109,7 @@ private enum CapturePose: Int, CaseIterable {
 
 private struct CapturedFrame {
     let pose: CapturePose
-    let rgbImage: CVPixelBuffer
+    let rgbImageJPEG: Data  // Store as JPEG data instead of pixel buffer
     let depthData: AVDepthData
     let timestamp: Date
     let yaw: Float?
@@ -293,12 +293,8 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var lastDepthPixelCount: Int = 0
     private var depthLowStreak: Int = 0
     
-    // Guided capture state
-    private var currentPose: CapturePose = .front
+    // Frame capture for Gemini
     private var capturedFrames: [CapturedFrame] = []
-    private var poseValidationTimer: Timer?
-    private var validPoseDuration: TimeInterval = 0
-    private var isGuidedCaptureMode = false
     
     private var renderingEnabled = true
     
@@ -472,351 +468,55 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     }
 
     @objc private func capturePLY(_ sender: UIButton) {
-        if isGuidedCaptureMode {
-            captureCurrentPose()
-        } else {
-            startGuidedCapture()
+        setCaptureButton(title: "Hold still...", isEnabled: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            self.performCaptureWithFrames()
         }
     }
     
-    private func startGuidedCapture() {
-        isGuidedCaptureMode = true
-        currentPose = .front
-        capturedFrames = []
-        validPoseDuration = 0
-        
-        updateUIForPose(currentPose)
-        startPoseValidationTimer()
-    }
-    
-    private func captureCurrentPose() {
-        guard let frame = captureCurrentFrame() else {
-            presentSimpleAlert(title: "Capture Failed", message: "Unable to capture frame. Please try again.")
-            return
-        }
-        
-        guard isValidPose(frame: frame, pose: currentPose) else {
-            presentSimpleAlert(title: "Invalid Pose", 
-                              message: "Please adjust: \(getPoseFeedback(frame: frame, pose: currentPose))")
-            return
-        }
-        
-        capturedFrames.append(frame)
-        hapticGenerator?.impactOccurred()
-        
-        if currentPose == .up {
-            // All poses captured - proceed with upload
-            completeGuidedCapture()
-        } else {
-            // Move to next pose
-            currentPose = CapturePose(rawValue: currentPose.rawValue + 1)!
-            updateUIForPose(currentPose)
-            validPoseDuration = 0
-        }
-    }
-    
-    private func captureCurrentFrame() -> CapturedFrame? {
-        var depthData: AVDepthData?
-        var colorBuffer: CVPixelBuffer?
-        latestFrameQueue.sync {
-            depthData = latestDepthData
-            colorBuffer = latestColorBuffer
-        }
-        
-        guard let depthData, let colorBuffer else {
-            return nil
-        }
-        
-        // Note: colorBuffer is already retained by latestFrameQueue, we'll copy it if needed
-        
-        let analysis = analyzeFace(in: colorBuffer)
-        let landmarks = analysis?.landmarks ?? []
-        
-        return CapturedFrame(
-            pose: currentPose,
-            rgbImage: colorBuffer,
-            depthData: depthData,
-            timestamp: Date(),
-            yaw: analysis?.yawDegrees,
-            pitch: analysis?.pitchDegrees,
-            roll: analysis?.rollDegrees,
-            landmarks: landmarks
-        )
-    }
-    
-    private func isValidPose(frame: CapturedFrame, pose: CapturePose) -> Bool {
-        guard let yaw = frame.yaw,
-              let pitch = frame.pitch,
-              let roll = frame.roll else {
-            return false
-        }
-        
-        // Require minimum landmarks
-        guard frame.landmarks.count >= 300 else {
-            return false
-        }
-        
-        // For front pose, be more lenient - allow if 2 out of 3 angles are good
-        if pose == .front {
-            let yawOk = pose.targetYaw.contains(yaw)
-            let pitchOk = pose.targetPitch.contains(pitch)
-            let rollOk = pose.targetRoll.contains(roll)
-            // Require yaw to be good (most important), and at least one other
-            return yawOk && (pitchOk || rollOk)
-        }
-        
-        // For other poses, require yaw and pitch to be good, roll is less critical
-        let yawOk = pose.targetYaw.contains(yaw)
-        let pitchOk = pose.targetPitch.contains(pitch)
-        let rollOk = pose.targetRoll.contains(roll)
-        
-        // Yaw is most important, pitch second, roll is least critical
-        if pose == .left || pose == .right {
-            return yawOk && pitchOk  // Don't require roll for side profiles
-        }
-        
-        // For up/down, require pitch and yaw
-        return yawOk && pitchOk
-    }
-    
-    private func getPoseFeedback(frame: CapturedFrame, pose: CapturePose) -> String {
-        var feedback: [String] = []
-        
-        // Only show feedback for critical angles (yaw and pitch)
-        // Roll feedback is less important and can be annoying
-        
-        if let yaw = frame.yaw {
-            if !pose.targetYaw.contains(yaw) {
-                if pose == .front {
-                    if yaw < pose.targetYaw.lowerBound {
-                        feedback.append("Turn right slightly")
-                    } else {
-                        feedback.append("Turn left slightly")
-                    }
-                } else if pose == .left {
-                    if yaw > pose.targetYaw.upperBound {
-                        feedback.append("Turn left more")
-                    } else if yaw < pose.targetYaw.lowerBound {
-                        feedback.append("Turn right slightly")
-                    }
-                } else if pose == .right {
-                    if yaw < pose.targetYaw.lowerBound {
-                        feedback.append("Turn right more")
-                    } else if yaw > pose.targetYaw.upperBound {
-                        feedback.append("Turn left slightly")
-                    }
-                }
-            }
-        }
-        
-        if let pitch = frame.pitch {
-            if !pose.targetPitch.contains(pitch) {
-                if pose == .down {
-                    if pitch > pose.targetPitch.upperBound {
-                        feedback.append("Look down more")
-                    } else {
-                        feedback.append("Look up slightly")
-                    }
-                } else if pose == .up {
-                    if pitch < pose.targetPitch.lowerBound {
-                        feedback.append("Look up more")
-                    } else {
-                        feedback.append("Look down slightly")
-                    }
-                } else if pose == .front {
-                    if pitch < pose.targetPitch.lowerBound {
-                        feedback.append("Look up slightly")
-                    } else {
-                        feedback.append("Look down slightly")
-                    }
-                }
-            }
-        }
-        
-        // Only show roll feedback if it's really off (more than 30 degrees)
-        if let roll = frame.roll, abs(roll) > 30 {
-            if roll < 0 {
-                feedback.append("Tilt head right")
-            } else {
-                feedback.append("Tilt head left")
-            }
-        }
-        
-        return feedback.isEmpty ? "Hold steady" : feedback.joined(separator: ", ")
-    }
-    
-    private func updateUIForPose(_ pose: CapturePose) {
-        DispatchQueue.main.async {
-            let progress = Float(pose.rawValue + 1) / Float(CapturePose.allCases.count)
-            self.guidanceProgress?.progress = progress
-            self.guidanceTitleLabel?.text = "Pose \(pose.rawValue + 1) of 5: \(pose.name)"
-            self.guidanceDetailLabel?.text = pose.instruction
-            self.setCaptureButton(title: "Capture \(pose.name)", isEnabled: true)
-            
-            // Update face frame color based on pose validity
-            self.updateFaceFrameColor()
-        }
-    }
-    
-    private func startPoseValidationTimer() {
-        poseValidationTimer?.invalidate()
-        poseValidationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.updatePoseValidation()
-        }
-    }
-    
-    private func stopPoseValidationTimer() {
-        poseValidationTimer?.invalidate()
-        poseValidationTimer = nil
-    }
-    
-    private func updatePoseValidation() {
-        guard isGuidedCaptureMode,
-              let frame = captureCurrentFrame() else {
-            return
-        }
-        
-        let isValid = isValidPose(frame: frame, pose: currentPose)
-        
-        if isValid {
-            validPoseDuration += 0.1
-            if validPoseDuration >= 1.0 {
-                // Auto-capture when valid for 1 second
-                DispatchQueue.main.async {
-                    self.captureCurrentPose()
-                }
-            }
-        } else {
-            validPoseDuration = 0
-        }
-        
-        DispatchQueue.main.async {
-            self.updateFaceFrameColor()
-            let feedback = self.getPoseFeedback(frame: frame, pose: self.currentPose)
-            if !isValid {
-                self.guidanceQualityLabel?.text = feedback
-            } else {
-                self.guidanceQualityLabel?.text = "Hold steady... (\(Int(self.validPoseDuration * 10) / 10)s)"
-            }
-        }
-    }
-    
-    private func updateFaceFrameColor() {
-        guard isGuidedCaptureMode else { return }
-        
-        let isValid = validPoseDuration >= 1.0
-        let color = isValid ? UIColor.systemGreen : UIColor.systemYellow
-        
-        DispatchQueue.main.async {
-            self.faceFrameView?.layer.borderColor = color.withAlphaComponent(0.8).cgColor
-        }
-    }
-    
-    private func completeGuidedCapture() {
-        stopPoseValidationTimer()
-        isGuidedCaptureMode = false
-        
-        setCaptureButton(title: "Preparing...", isEnabled: false)
-        
-        // Build PLY from all captured frames
-        processingQueue.async {
-            self.buildPLYFromCapturedFrames { result in
-                DispatchQueue.main.async {
-                    switch result {
-                    case .success(let plyData):
-                        self.setCaptureButton(title: "Uploading...", isEnabled: false)
-                        self.uploadPLYWithFrames(data: plyData, frames: self.capturedFrames) { uploadResult in
-                            DispatchQueue.main.async {
-                                self.handleUploadResult(uploadResult, plyData: plyData)
-                            }
-                        }
-                    case .failure(let error):
-                        self.setCaptureButton(title: "Capture PLY", isEnabled: true)
-                        self.presentSimpleAlert(title: "Capture Failed", message: error.localizedDescription)
-                    }
-                }
-            }
-        }
-    }
-    
-    private func buildPLYFromCapturedFrames(completion: @escaping (Result<Data, Error>) -> Void) {
-        var allPoints: [String] = []
-        var totalVertexCount = 0
-        
-        for frame in capturedFrames {
-            guard let framePoints = buildPLY(depthData: frame.depthData,
-                                            colorBuffer: frame.rgbImage,
-                                            strideStep: 4) else {
-                continue
-            }
-            
-            // Parse PLY points (simple string parsing)
-            let pointsString = String(data: framePoints, encoding: .utf8) ?? ""
-            let lines = pointsString.components(separatedBy: .newlines)
-            var inHeader = true
-            var vertexCount = 0
-            
-            for line in lines {
-                if line.hasPrefix("element vertex") {
-                    let parts = line.components(separatedBy: .whitespaces)
-                    if parts.count >= 3, let count = Int(parts[2]) {
-                        vertexCount = count
-                    }
-                    continue
-                }
-                if line.hasPrefix("end_header") {
-                    inHeader = false
-                    continue
-                }
-                if inHeader || line.isEmpty {
-                    continue
-                }
-                // Parse vertex line: "x y z r g b"
-                let parts = line.trimmingCharacters(in: .whitespaces).components(separatedBy: .whitespaces)
-                if parts.count >= 6 {
-                    allPoints.append(line)
-                    totalVertexCount += 1
-                }
-            }
-        }
-        
-        guard totalVertexCount >= 1000 else {
-            completion(.failure(CaptureError.sparsePoints(totalVertexCount)))
-            return
-        }
-        
-        if let plyData = buildPLYData(from: allPoints) {
-            completion(.success(plyData))
-        } else {
-            completion(.failure(CaptureError.insufficientPoints))
-        }
-    }
-    
-    private func handleUploadResult(_ result: Result<String, Error>, plyData: Data) {
-        switch result {
-        case .success(let scanId):
-            setCaptureButton(title: "Processing...", isEnabled: false)
-            pollScanStatus(scanId: scanId) { statusResult in
-                DispatchQueue.main.async {
-                    self.setCaptureButton(title: "Capture PLY", isEnabled: true)
-                    switch statusResult {
-                    case .success:
-                        self.presentSimpleAlert(title: "Scan Ready",
-                                              message: "Opening web app with scan.")
-                        self.openFrontend(scanId: scanId)
-                    case .failure(let error):
-                        self.presentSimpleAlert(title: "Scan Failed",
-                                              message: error.localizedDescription)
-                    }
-                }
-            }
-        case .failure(let error):
+    private func performCaptureWithFrames() {
+        updateDepthQuality()
+        let distanceOk = isDistanceAcceptable()
+        let depthOk = isDepthQualityAcceptable()
+        if depthLowStreak >= 10 {
             setCaptureButton(title: "Capture PLY", isEnabled: true)
-            let _ = savePLY(data: plyData)
-            presentSimpleAlert(title: "Upload Failed",
-                              message: "Saved PLY locally. Error: \(error.localizedDescription)")
+            presentSimpleAlert(title: "Rhinovate", message: "TrueDepth not available. Close other camera apps and restart the phone.")
+            return
+        }
+        if !distanceOk || !depthOk {
+            setCaptureButton(title: "Capture PLY", isEnabled: true)
+            presentSimpleAlert(title: "Rhinovate", message: "Move to 20–55 cm and improve lighting. Depth quality is too low.")
+            return
+        }
+
+        setCaptureButton(title: "Scanning...", isEnabled: false)
+        scanDuration = 7.0
+        scanStartTime = Date()
+        startGuidanceTimer()
+        
+        // Collect frames with RGB images for Gemini
+        collectMultiFramePLYWithImages(duration: scanDuration,
+                                       interval: 0.2,
+                                       strideStep: 4,
+                                       maxPoints: 500_000) { result in
+            DispatchQueue.main.async {
+                self.stopGuidanceTimer()
+            }
+            switch result {
+            case .success(let (plyData, frames)):
+                self.setCaptureButton(title: "Uploading...", isEnabled: false)
+                self.uploadPLYWithFrames(data: plyData, frames: frames) { uploadResult in
+                    DispatchQueue.main.async {
+                        self.handleUploadResult(uploadResult, plyData: plyData)
+                    }
+                }
+            case .failure(let error):
+                self.setCaptureButton(title: "Capture PLY", isEnabled: true)
+                self.presentSimpleAlert(title: "Rhinovate", message: error.localizedDescription)
+            }
         }
     }
+    
 
     private func performCapture() {
         updateDepthQuality()
@@ -1136,9 +836,9 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         lastPointCount = 0
         guidanceProgress?.progress = 0.0
         guidanceTitleLabel?.text = "Scanning..."
-        guidanceDetailLabel?.text = "Neutral face, lips closed. Front → Left 30° → Front → Right 30° → Front"
+        guidanceDetailLabel?.text = "Slowly turn your head: left → right → up → down"
         guidanceQualityLabel?.text = "Quality: collecting..."
-        directionLabel?.text = "Hold steady: face front"
+        directionLabel?.text = "Move your head naturally"
 
         scanTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             self?.updateGuidanceDuringScan()
@@ -2233,6 +1933,194 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         return output.data(using: .utf8)
     }
 
+    private func collectMultiFramePLYWithImages(duration: TimeInterval,
+                                                interval: TimeInterval,
+                                                strideStep: Int,
+                                                maxPoints: Int,
+                                                completion: @escaping (Result<(Data, [CapturedFrame]), Error>) -> Void) {
+        processingQueue.async {
+            var candidates: [FrameCandidate] = []
+            var rgbFrames: [CapturedFrame] = []
+            var referenceLandmarks: [CGPoint]?
+            var lastAnalysis: FaceAnalysis?
+            let endTime = Date().addingTimeInterval(duration)
+
+            func finalize() {
+                guard !candidates.isEmpty else {
+                    completion(.failure(CaptureError.noFrames))
+                    return
+                }
+
+                let filtered = candidates.filter { candidate in
+                    let validOk = candidate.depthValidRatio >= 0.08 && candidate.pointCount >= 5000
+                    let rollOk = candidate.rollDegrees.map { abs($0) < 15.0 } ?? true
+                    let yawOk = candidate.yawDegrees.map { abs($0) < 35.0 } ?? true
+                    let mouthOk = candidate.mouthOpenRatio.map { $0 < 0.06 } ?? true
+                    let lmkOk = candidate.landmarkRMS.map { $0 < 0.02 } ?? true
+                    let deltaPoseOk = candidate.deltaPose.map { $0 < 6.0 } ?? true
+                    let deltaCentroidOk = candidate.deltaCentroid.map { $0 < 0.01 } ?? true
+                    return validOk && rollOk && yawOk && mouthOk && lmkOk && deltaPoseOk && deltaCentroidOk
+                }
+
+                let pool = filtered.isEmpty ? candidates : filtered
+                let scored = pool.sorted { a, b in
+                    self.scoreCandidate(a) > self.scoreCandidate(b)
+                }
+
+                // Select best frames for 5 poses automatically
+                let selectedFrames = self.selectBestFramesForPoses(scored: scored, rgbFrames: rgbFrames)
+
+                var points: [String] = []
+                for candidate in scored.prefix(20) {  // Use top 20 candidates for PLY
+                    for point in candidate.points {
+                        if points.count >= maxPoints {
+                            break
+                        }
+                        points.append(point)
+                    }
+                }
+
+                guard points.count >= 1000 else {
+                    completion(.failure(CaptureError.sparsePoints(points.count)))
+                    return
+                }
+                
+                if let plyData = self.buildPLYData(from: points) {
+                    completion(.success((plyData, selectedFrames)))
+                } else {
+                    completion(.failure(CaptureError.insufficientPoints))
+                }
+            }
+
+            func sampleNext() {
+                if Date() >= endTime {
+                    finalize()
+                    return
+                }
+
+                if let candidate = self.captureFrameCandidate(strideStep: strideStep,
+                                                              maxPoints: maxPoints,
+                                                              referenceLandmarks: &referenceLandmarks,
+                                                              lastAnalysis: &lastAnalysis) {
+                    candidates.append(candidate)
+                    self.lastPointCount = candidate.pointCount
+                    
+                    // Also capture RGB frame for Gemini (use same data as candidate)
+                    var depthData: AVDepthData?
+                    var colorBuffer: CVPixelBuffer?
+                    self.latestFrameQueue.sync {
+                        depthData = self.latestDepthData
+                        colorBuffer = self.latestColorBuffer
+                    }
+                    
+                    if let depthData, let colorBuffer {
+                        // Convert to JPEG immediately to avoid pixel buffer retention issues
+                        guard let jpegData = self.convertPixelBufferToJPEG(colorBuffer, quality: 0.85) else {
+                            continue
+                        }
+                        
+                        let analysis = self.analyzeFace(in: colorBuffer)
+                        let landmarks = analysis?.landmarks ?? []
+                        
+                        // Determine pose type from angles
+                        let pose = self.determinePoseFromAngles(yaw: analysis?.yawDegrees, pitch: analysis?.pitchDegrees)
+                        
+                        let frame = CapturedFrame(
+                            pose: pose,
+                            rgbImageJPEG: jpegData,
+                            depthData: depthData,
+                            timestamp: Date(),
+                            yaw: analysis?.yawDegrees,
+                            pitch: analysis?.pitchDegrees,
+                            roll: analysis?.rollDegrees,
+                            landmarks: landmarks
+                        )
+                        rgbFrames.append(frame)
+                    }
+                    
+                    if candidate.depthValidRatio >= 0.1 && candidate.pointCount >= 10000 {
+                        DispatchQueue.main.async {
+                            self.hapticGenerator?.impactOccurred()
+                            self.hapticGenerator?.prepare()
+                        }
+                    }
+                }
+
+                DispatchQueue.global().asyncAfter(deadline: .now() + interval) {
+                    self.processingQueue.async {
+                        sampleNext()
+                    }
+                }
+            }
+
+            sampleNext()
+        }
+    }
+    
+    private func determinePoseFromAngles(yaw: Float?, pitch: Float?) -> CapturePose {
+        guard let yaw = yaw, let pitch = pitch else {
+            return .front
+        }
+        
+        // Determine pose based on angles
+        if abs(yaw) < 15 {
+            if pitch < -20 {
+                return .down
+            } else if pitch > 20 {
+                return .up
+            } else {
+                return .front
+            }
+        } else if yaw < -70 {
+            return .left
+        } else if yaw > 70 {
+            return .right
+        }
+        
+        return .front
+    }
+    
+    private func selectBestFramesForPoses(scored: [FrameCandidate], rgbFrames: [CapturedFrame]) -> [CapturedFrame] {
+        var selected: [CapturePose: CapturedFrame] = [:]
+        
+        // Group frames by pose
+        for frame in rgbFrames {
+            let pose = frame.pose
+            if selected[pose] == nil {
+                selected[pose] = frame
+            } else if let current = selected[pose],
+                      let currentYaw = current.yaw,
+                      let frameYaw = frame.yaw {
+                // Prefer frame closer to ideal angle
+                let currentDist = abs(currentYaw - idealYawForPose(pose))
+                let frameDist = abs(frameYaw - idealYawForPose(pose))
+                if frameDist < currentDist {
+                    selected[pose] = frame
+                }
+            }
+        }
+        
+        // Return in order: front, left, right, down, up
+        var result: [CapturedFrame] = []
+        for pose in [CapturePose.front, .left, .right, .down, .up] {
+            if let frame = selected[pose] {
+                result.append(frame)
+            }
+        }
+        
+        return result
+    }
+    
+    private func idealYawForPose(_ pose: CapturePose) -> Float {
+        switch pose {
+        case .front: return 0
+        case .left: return -90
+        case .right: return 90
+        case .down: return 0
+        case .up: return 0
+        }
+    }
+
     private func collectMultiFramePLY(duration: TimeInterval,
                                       interval: TimeInterval,
                                       strideStep: Int,
@@ -2827,19 +2715,17 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         body.append(data)
         body.append("\r\n".data(using: .utf8)!)
         
-        // Add RGB frames as JPEG images
-        let frameNames = ["front", "left", "right", "down", "up"]
-        for (index, frame) in frames.enumerated() {
-            guard index < frameNames.count,
-                  let jpegData = convertPixelBufferToJPEG(frame.rgbImage, quality: 0.85) else {
+        // Add RGB frames as JPEG images (already converted to JPEG)
+        let frameNames: [CapturePose: String] = [.front: "front", .left: "left", .right: "right", .down: "down", .up: "up"]
+        for frame in frames {
+            guard let fieldName = frameNames[frame.pose] else {
                 continue
             }
             
-            let fieldName = "image_\(frameNames[index])"
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"\(fieldName)\"; filename=\"\(fieldName).jpg\"\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"image_\(fieldName)\"; filename=\"\(fieldName).jpg\"\r\n".data(using: .utf8)!)
             body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
-            body.append(jpegData)
+            body.append(frame.rgbImageJPEG)
             body.append("\r\n".data(using: .utf8)!)
         }
         
