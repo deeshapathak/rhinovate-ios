@@ -490,7 +490,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
 
         setCaptureButton(title: "Scanning...", isEnabled: false)
-        scanDuration = 25.0  // Longer scan for better coverage and quality
+        scanDuration = 30.0  // Longer scan for better coverage and quality
         scanStartTime = Date()
         startGuidanceTimer()
         
@@ -501,6 +501,8 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                                        maxPoints: 500_000) { result in
             DispatchQueue.main.async {
                 self.stopGuidanceTimer()
+                // Show completion animation
+                self.showScanCompleteAnimation()
             }
             switch result {
             case .success(let (plyData, frames)):
@@ -621,42 +623,75 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             return
         }
 
+        // Modern gradient background
         let container = UIView()
         container.translatesAutoresizingMaskIntoConstraints = false
-        container.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        container.layer.cornerRadius = 12
+        container.backgroundColor = UIColor.clear
+        
+        // Gradient layer for trendy look
+        let gradientLayer = CAGradientLayer()
+        gradientLayer.colors = [
+            UIColor(red: 0.1, green: 0.1, blue: 0.15, alpha: 0.85).cgColor,
+            UIColor(red: 0.05, green: 0.05, blue: 0.1, alpha: 0.9).cgColor
+        ]
+        gradientLayer.cornerRadius = 20
+        gradientLayer.masksToBounds = true
+        container.layer.insertSublayer(gradientLayer, at: 0)
+        
+        // Blur effect for depth
+        let blurEffect = UIBlurEffect(style: .systemUltraThinMaterialDark)
+        let blurView = UIVisualEffectView(effect: blurEffect)
+        blurView.translatesAutoresizingMaskIntoConstraints = false
+        blurView.layer.cornerRadius = 20
+        blurView.clipsToBounds = true
+        container.addSubview(blurView)
+        
+        // Update gradient frame when view lays out
+        DispatchQueue.main.async {
+            gradientLayer.frame = container.bounds
+        }
 
         let title = UILabel()
         title.translatesAutoresizingMaskIntoConstraints = false
-        title.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+        title.font = UIFont.systemFont(ofSize: 18, weight: .bold)
         title.textColor = .white
-        title.text = "Capture Guidance"
+        title.text = "✨ 3D Face Scan"
+        title.textAlignment = .center
 
         let detail = UILabel()
         detail.translatesAutoresizingMaskIntoConstraints = false
-        detail.font = UIFont.systemFont(ofSize: 13, weight: .regular)
-        detail.textColor = .white
+        detail.font = UIFont.systemFont(ofSize: 15, weight: .medium)
+        detail.textColor = UIColor.white.withAlphaComponent(0.95)
         detail.numberOfLines = 0
-        detail.text = "Set the phone down, center your face, and tap Capture."
+        detail.text = "Center your face and tap to start"
+        detail.textAlignment = .center
 
+        // Modern progress bar with rounded corners
         let progress = UIProgressView(progressViewStyle: .default)
         progress.translatesAutoresizingMaskIntoConstraints = false
         progress.progress = 0.0
-        progress.trackTintColor = UIColor.white.withAlphaComponent(0.2)
-        progress.tintColor = UIColor.systemGreen
+        progress.trackTintColor = UIColor.white.withAlphaComponent(0.15)
+        // Gradient progress bar color
+        progress.progressTintColor = UIColor(red: 0.4, green: 0.7, blue: 1.0, alpha: 1.0)
+        progress.layer.cornerRadius = 4
+        progress.clipsToBounds = true
+        progress.transform = CGAffineTransform(scaleX: 1.0, y: 2.5)
 
         let distance = UILabel()
         distance.translatesAutoresizingMaskIntoConstraints = false
-        distance.font = UIFont.systemFont(ofSize: 12, weight: .regular)
-        distance.textColor = UIColor.white.withAlphaComponent(0.85)
-        distance.text = "Distance: --"
+        distance.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        distance.textColor = UIColor.white.withAlphaComponent(0.9)
+        distance.text = "📏 Distance: --"
+        distance.textAlignment = .center
 
         let quality = UILabel()
         quality.translatesAutoresizingMaskIntoConstraints = false
-        quality.font = UIFont.systemFont(ofSize: 12, weight: .regular)
-        quality.textColor = UIColor.white.withAlphaComponent(0.85)
-        quality.text = "Quality: --"
+        quality.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        quality.textColor = UIColor.white.withAlphaComponent(0.9)
+        quality.text = "✨ Quality: --"
+        quality.textAlignment = .center
 
+        container.addSubview(blurView)
         container.addSubview(title)
         container.addSubview(detail)
         container.addSubview(progress)
@@ -666,31 +701,39 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         view.addSubview(container)
 
         NSLayoutConstraint.activate([
-            container.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            container.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            container.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            blurView.topAnchor.constraint(equalTo: container.topAnchor),
+            blurView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            blurView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            blurView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            
+            container.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            container.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            container.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
 
-            title.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            title.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            title.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            title.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
 
-            detail.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
-            detail.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            detail.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            detail.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
+            detail.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            detail.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
 
-            progress.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 10),
-            progress.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            progress.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            progress.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 14),
+            progress.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            progress.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
 
-            distance.topAnchor.constraint(equalTo: progress.bottomAnchor, constant: 8),
-            distance.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            distance.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            distance.topAnchor.constraint(equalTo: progress.bottomAnchor, constant: 12),
+            distance.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            distance.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
 
-            quality.topAnchor.constraint(equalTo: distance.bottomAnchor, constant: 4),
-            quality.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            quality.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            quality.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+            quality.topAnchor.constraint(equalTo: distance.bottomAnchor, constant: 6),
+            quality.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            quality.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            quality.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
         ])
+        
+        // Store gradient layer reference for frame updates
+        container.layer.setValue(gradientLayer, forKey: "gradientLayer")
 
         guidanceContainer = container
         guidanceTitleLabel = title
@@ -857,10 +900,16 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         scanTimer?.invalidate()
         lastPointCount = 0
         guidanceProgress?.progress = 0.0
-        guidanceTitleLabel?.text = "Scanning..."
+        
+        // Smooth animation for progress bar
+        UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
+            self.guidanceProgress?.alpha = 1.0
+        }
+        
+        guidanceTitleLabel?.text = "✨ Scanning..."
         guidanceDetailLabel?.text = "Slowly turn your head: left → right → up → down"
-        guidanceQualityLabel?.text = "Quality: collecting..."
-        directionLabel?.text = "Move your head naturally"
+        guidanceQualityLabel?.text = "✨ Quality: collecting..."
+        directionLabel?.text = "🔄 Move your head naturally"
 
         scanTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             self?.updateGuidanceDuringScan()
@@ -870,11 +919,47 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private func stopGuidanceTimer() {
         scanTimer?.invalidate()
         scanTimer = nil
-        guidanceProgress?.progress = 0.0
-        guidanceTitleLabel?.text = "Capture Guidance"
-        guidanceDetailLabel?.text = "Set the phone down, center your face, and tap Capture."
-        guidanceQualityLabel?.text = "Quality: --"
-        directionLabel?.text = "Align face in frame"
+        guidanceProgress?.progress = 1.0
+        
+        // Animate progress completion
+        UIView.animate(withDuration: 0.3) {
+            self.guidanceProgress?.alpha = 0.7
+        }
+        
+        guidanceTitleLabel?.text = "✨ 3D Face Scan"
+        guidanceDetailLabel?.text = "Center your face and tap to start"
+        guidanceQualityLabel?.text = "✨ Quality: --"
+        directionLabel?.text = "👤 Align face in frame"
+    }
+    
+    private func showScanCompleteAnimation() {
+        // Celebration animation when scan completes
+        let checkmark = UILabel()
+        checkmark.text = "✓"
+        checkmark.font = UIFont.systemFont(ofSize: 60, weight: .bold)
+        checkmark.textColor = UIColor(red: 0.2, green: 0.9, blue: 0.4, alpha: 1.0)
+        checkmark.textAlignment = .center
+        checkmark.translatesAutoresizingMaskIntoConstraints = false
+        checkmark.alpha = 0
+        checkmark.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
+        
+        view.addSubview(checkmark)
+        NSLayoutConstraint.activate([
+            checkmark.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            checkmark.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
+        
+        UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.6, initialSpringVelocity: 0.8, options: .curveEaseOut) {
+            checkmark.alpha = 1.0
+            checkmark.transform = .identity
+        } completion: { _ in
+            UIView.animate(withDuration: 0.3, delay: 0.5) {
+                checkmark.alpha = 0
+                checkmark.transform = CGAffineTransform(scaleX: 1.5, y: 1.5)
+            } completion: { _ in
+                checkmark.removeFromSuperview()
+            }
+        }
     }
 
     private func updateGuidanceDuringScan() {
@@ -892,9 +977,19 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         let distance = estimateCenterDistanceMeters()
         if let distance {
             let cm = distance * 100.0
-            guidanceDistanceLabel?.text = String(format: "Distance: %.0f cm (target 20–55 cm)", cm)
+            let emoji = (cm >= 20 && cm <= 55) ? "✅" : "⚠️"
+            guidanceDistanceLabel?.text = String(format: "%@ Distance: %.0f cm", emoji, cm)
         } else {
-            guidanceDistanceLabel?.text = "Distance: -- (target 20–55 cm)"
+            guidanceDistanceLabel?.text = "📏 Distance: --"
+        }
+        
+        // Update quality with emoji
+        if let qualityText = guidanceQualityLabel?.text, qualityText.contains("Quality:") {
+            let qualityValue = qualityText.replacingOccurrences(of: "✨ Quality: ", with: "")
+            if qualityValue != "--" && qualityValue != "collecting..." {
+                let emoji = qualityValue.contains("good") || qualityValue.contains("excellent") ? "✅" : "⚠️"
+                guidanceQualityLabel?.text = String(format: "%@ Quality: %@", emoji, qualityValue)
+            }
         }
 
         updateDepthQuality()
@@ -2009,10 +2104,13 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                     return
                 }
                 
-                if let plyData = self.buildPLYData(from: points) {
-                    completion(.success((plyData, selectedFrames)))
-                } else {
-                    completion(.failure(CaptureError.insufficientPoints))
+                // Build PLY on background thread to prevent UI freeze
+                DispatchQueue.global(qos: .userInitiated).async {
+                    if let plyData = self.buildPLYData(from: points) {
+                        completion(.success((plyData, selectedFrames)))
+                    } else {
+                        completion(.failure(CaptureError.insufficientPoints))
+                    }
                 }
             }
 
