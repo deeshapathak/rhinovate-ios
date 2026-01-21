@@ -26,17 +26,26 @@ private struct ScanResponse: Sendable {
 
 private struct FaceAnalysis {
     let landmarks: [CGPoint]
-    let yaw: Float?
+    let yawDegrees: Float?
+    let rollDegrees: Float?
     let mouthOpenRatio: Float?
+    let interocular: Float?
+    let centroid: CGPoint?
 }
 
 private struct FrameCandidate {
     let points: [String]
     let pointCount: Int
     let depthValidRatio: Float
-    let yaw: Float?
+    let landmarks: [CGPoint]
+    let yawDegrees: Float?
+    let rollDegrees: Float?
     let mouthOpenRatio: Float?
+    let interocular: Float?
     let landmarkRMS: Float?
+    let deltaPose: Float?
+    let deltaLandmarks: Float?
+    let deltaCentroid: Float?
 }
 
 // lzchao
@@ -200,6 +209,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var directionLabel: UILabel?
     private var faceFrameView: UIView?
     private var faceFrameLabel: UILabel?
+    private var hapticGenerator: UIImpactFeedbackGenerator?
     private var trueDepthStatusLabel: UILabel?
     private var depthHealthTimer: Timer?
     private var lastDepthFrameAt: Date?
@@ -286,6 +296,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         setupCaptureButton()
         setupGuidanceOverlay()
         setupTrueDepthHealthOverlay()
+        hapticGenerator = UIImpactFeedbackGenerator(style: .light)
         
         JETEnabled = false
         cloudToJETSegCtrl.selectedSegmentIndex = 1
@@ -406,7 +417,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
 
         setCaptureButton(title: "Scanning...", isEnabled: false)
-        scanDuration = 8.0
+        scanDuration = 25.0
         scanStartTime = Date()
         startGuidanceTimer()
         collectMultiFramePLY(duration: scanDuration,
@@ -708,7 +719,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         lastPointCount = 0
         guidanceProgress?.progress = 0.0
         guidanceTitleLabel?.text = "Scanning..."
-        guidanceDetailLabel?.text = "Front → Left 30° → Front → Right 30° → Front"
+        guidanceDetailLabel?.text = "Neutral face, lips closed. Front → Left 30° → Front → Right 30° → Front"
         guidanceQualityLabel?.text = "Quality: collecting..."
         directionLabel?.text = "Hold steady: face front"
 
@@ -1813,6 +1824,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         processingQueue.async {
             var candidates: [FrameCandidate] = []
             var referenceLandmarks: [CGPoint]?
+            var lastAnalysis: FaceAnalysis?
             let endTime = Date().addingTimeInterval(duration)
 
             func finalize() {
@@ -1822,21 +1834,22 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 }
 
                 let filtered = candidates.filter { candidate in
-                    let yawOk = candidate.yaw.map { abs($0) < 0.7 } ?? true
-                    let mouthOk = candidate.mouthOpenRatio.map { $0 < 0.08 } ?? true
-                    let lmkOk = candidate.landmarkRMS.map { $0 < 0.05 } ?? true
-                    return candidate.pointCount >= 8000
-                        && candidate.depthValidRatio >= 0.05
-                        && yawOk
-                        && mouthOk
-                        && lmkOk
+                    let validOk = candidate.depthValidRatio >= 0.08 && candidate.pointCount >= 5000
+                    let rollOk = candidate.rollDegrees.map { abs($0) < 15.0 } ?? true
+                    let yawOk = candidate.yawDegrees.map { abs($0) < 35.0 } ?? true
+                    let mouthOk = candidate.mouthOpenRatio.map { $0 < 0.06 } ?? true
+                    let lmkOk = candidate.landmarkRMS.map { $0 < 0.02 } ?? true
+                    let deltaPoseOk = candidate.deltaPose.map { $0 < 6.0 } ?? true
+                    let deltaCentroidOk = candidate.deltaCentroid.map { $0 < 0.01 } ?? true
+                    return validOk && rollOk && yawOk && mouthOk && lmkOk && deltaPoseOk && deltaCentroidOk
                 }
 
-                let scored = (filtered.isEmpty ? candidates : filtered).sorted { a, b in
+                let pool = filtered.isEmpty ? candidates : filtered
+                let scored = pool.sorted { a, b in
                     self.scoreCandidate(a) > self.scoreCandidate(b)
                 }
-                let keepCount = min(6, scored.count)
-                let selected = Array(scored.prefix(keepCount))
+
+                let selected = self.selectByYawBuckets(scored: scored, total: 8)
 
                 var points: [String] = []
                 for candidate in selected {
@@ -1867,9 +1880,16 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 
                 if let candidate = self.captureFrameCandidate(strideStep: strideStep,
                                                               maxPoints: maxPoints,
-                                                              referenceLandmarks: &referenceLandmarks) {
+                                                              referenceLandmarks: &referenceLandmarks,
+                                                              lastAnalysis: &lastAnalysis) {
                     candidates.append(candidate)
                     self.lastPointCount = candidate.pointCount
+                    if candidate.depthValidRatio >= 0.1 && candidate.pointCount >= 10000 {
+                        DispatchQueue.main.async {
+                            self.hapticGenerator?.impactOccurred()
+                            self.hapticGenerator?.prepare()
+                        }
+                    }
                 }
 
                 DispatchQueue.global().asyncAfter(deadline: .now() + interval) {
@@ -1884,23 +1904,45 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     }
 
     private func scoreCandidate(_ candidate: FrameCandidate) -> Float {
-        var score = candidate.depthValidRatio * 2.0
-        score += min(Float(candidate.pointCount) / 50_000.0, 1.0)
-        if let rms = candidate.landmarkRMS {
-            score -= rms * 2.0
+        let validScore = min(max((candidate.depthValidRatio - 0.05) / 0.15, 0), 1)
+        let pointScore = min(Float(candidate.pointCount) / 30_000.0, 1.0)
+        let lmkScore = candidate.landmarkRMS.map { max(0.0, 1.0 - ($0 / 0.02)) } ?? 0.5
+        let deltaScore = candidate.deltaLandmarks.map { max(0.0, 1.0 - ($0 / 0.02)) } ?? 0.5
+        let rollScore = candidate.rollDegrees.map { max(0.0, 1.0 - (abs($0) / 15.0)) } ?? 0.5
+
+        return (0.35 * validScore)
+            + (0.30 * lmkScore)
+            + (0.20 * deltaScore)
+            + (0.10 * rollScore)
+            + (0.05 * pointScore)
+    }
+
+    private func selectByYawBuckets(scored: [FrameCandidate], total: Int) -> [FrameCandidate] {
+        let left = scored.filter { ($0.yawDegrees ?? 0) <= -10 && ($0.yawDegrees ?? 0) >= -25 }
+        let center = scored.filter { abs($0.yawDegrees ?? 0) <= 8 }
+        let right = scored.filter { ($0.yawDegrees ?? 0) >= 10 && ($0.yawDegrees ?? 0) <= 25 }
+
+        var selected: [FrameCandidate] = []
+        selected.append(contentsOf: center.prefix(3))
+        selected.append(contentsOf: left.prefix(2))
+        selected.append(contentsOf: right.prefix(2))
+
+        if selected.count < total {
+            let remaining = scored.filter { candidate in
+                !selected.contains(where: { $0 === candidate })
+            }
+            selected.append(contentsOf: remaining.prefix(total - selected.count))
         }
-        if let mouth = candidate.mouthOpenRatio {
-            score -= mouth * 3.0
+        if selected.isEmpty {
+            return Array(scored.prefix(min(total, scored.count)))
         }
-        if let yaw = candidate.yaw {
-            score -= abs(yaw) * 0.2
-        }
-        return score
+        return Array(selected.prefix(min(total, selected.count)))
     }
 
     private func captureFrameCandidate(strideStep: Int,
                                        maxPoints: Int,
-                                       referenceLandmarks: inout [CGPoint]?) -> FrameCandidate? {
+                                       referenceLandmarks: inout [CGPoint]?,
+                                       lastAnalysis: inout FaceAnalysis?) -> FrameCandidate? {
         var depthData: AVDepthData?
         var colorBuffer: CVPixelBuffer?
         latestFrameQueue.sync {
@@ -1926,13 +1968,41 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         let landmarkRMS = referenceLandmarks.flatMap { ref in
             computeLandmarkRMS(current: landmarks, reference: ref)
         }
+        let deltaLandmarks = lastAnalysis.flatMap { prev in
+            computeLandmarkRMS(current: landmarks, reference: prev.landmarks)
+        }
+        let deltaPose = lastAnalysis.flatMap { prev -> Float? in
+            guard let yawNow = analysis?.yawDegrees,
+                  let rollNow = analysis?.rollDegrees,
+                  let yawPrev = prev.yawDegrees,
+                  let rollPrev = prev.rollDegrees else {
+                return nil
+            }
+            return abs(yawNow - yawPrev) + abs(rollNow - rollPrev)
+        }
+        let deltaCentroid = lastAnalysis.flatMap { prev -> Float? in
+            guard let nowCentroid = analysis?.centroid,
+                  let prevCentroid = prev.centroid else {
+                return nil
+            }
+            let dx = Float(nowCentroid.x - prevCentroid.x)
+            let dy = Float(nowCentroid.y - prevCentroid.y)
+            return sqrt(dx * dx + dy * dy)
+        }
+        lastAnalysis = analysis
 
         return FrameCandidate(points: frame.points,
                               pointCount: frame.points.count,
                               depthValidRatio: frame.depthValidRatio,
-                              yaw: analysis?.yaw,
+                              landmarks: landmarks,
+                              yawDegrees: analysis?.yawDegrees,
+                              rollDegrees: analysis?.rollDegrees,
                               mouthOpenRatio: analysis?.mouthOpenRatio,
-                              landmarkRMS: landmarkRMS)
+                              interocular: analysis?.interocular,
+                              landmarkRMS: landmarkRMS,
+                              deltaPose: deltaPose,
+                              deltaLandmarks: deltaLandmarks,
+                              deltaCentroid: deltaCentroid)
     }
 
     private func buildFramePoints(depthData: AVDepthData,
@@ -2050,17 +2120,50 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 
         let landmarks = convertLandmarks(allPoints, faceBoundingBox: face.boundingBox)
         var mouthOpen: Float?
+        var interocular: Float?
+        var centroid = CGPoint(x: 0.0, y: 0.0)
+        if !landmarks.isEmpty {
+            let sum = landmarks.reduce(CGPoint.zero) { acc, pt in
+                CGPoint(x: acc.x + pt.x, y: acc.y + pt.y)
+            }
+            centroid = CGPoint(x: sum.x / CGFloat(landmarks.count), y: sum.y / CGFloat(landmarks.count))
+        }
+
+        if let leftEye = face.landmarks?.leftEye, let rightEye = face.landmarks?.rightEye {
+            let leftPts = convertLandmarks(leftEye, faceBoundingBox: face.boundingBox)
+            let rightPts = convertLandmarks(rightEye, faceBoundingBox: face.boundingBox)
+            if let leftCenter = averagePoint(leftPts), let rightCenter = averagePoint(rightPts) {
+                let dx = Float(leftCenter.x - rightCenter.x)
+                let dy = Float(leftCenter.y - rightCenter.y)
+                interocular = sqrt(dx * dx + dy * dy)
+            }
+        }
         if let outerLips = face.landmarks?.outerLips {
             let mouthPoints = convertLandmarks(outerLips, faceBoundingBox: face.boundingBox)
             if let minY = mouthPoints.map({ $0.y }).min(),
                let maxY = mouthPoints.map({ $0.y }).max() {
-                let height = max(face.boundingBox.height, CGFloat(1e-6))
-                mouthOpen = Float((maxY - minY) / height)
+                let norm = max(interocular ?? Float(face.boundingBox.height), 1e-6)
+                mouthOpen = Float((maxY - minY)) / norm
             }
         }
+        let yawDeg = face.yaw.map { Float(truncating: $0) * (180.0 / .pi) }
+        let rollDeg = face.roll.map { Float(truncating: $0) * (180.0 / .pi) }
         return FaceAnalysis(landmarks: landmarks,
-                            yaw: face.yaw?.floatValue,
-                            mouthOpenRatio: mouthOpen)
+                            yawDegrees: yawDeg,
+                            rollDegrees: rollDeg,
+                            mouthOpenRatio: mouthOpen,
+                            interocular: interocular,
+                            centroid: centroid)
+    }
+
+    private func averagePoint(_ points: [CGPoint]) -> CGPoint? {
+        guard !points.isEmpty else {
+            return nil
+        }
+        let sum = points.reduce(CGPoint.zero) { acc, pt in
+            CGPoint(x: acc.x + pt.x, y: acc.y + pt.y)
+        }
+        return CGPoint(x: sum.x / CGFloat(points.count), y: sum.y / CGFloat(points.count))
     }
 
     private func convertLandmarks(_ region: VNFaceLandmarkRegion2D,
