@@ -490,7 +490,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
 
         setCaptureButton(title: "Scanning...", isEnabled: false)
-        scanDuration = 15.0  // Longer scan for better coverage
+        scanDuration = 25.0  // Longer scan for better coverage and quality
         scanStartTime = Date()
         startGuidanceTimer()
         
