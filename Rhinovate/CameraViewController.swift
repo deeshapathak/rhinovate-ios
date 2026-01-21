@@ -1929,7 +1929,13 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 
         if selected.count < total {
             let remaining = scored.filter { candidate in
-                !selected.contains(where: { $0 === candidate })
+                !selected.contains(where: { $0.pointCount == candidate.pointCount
+                    && $0.depthValidRatio == candidate.depthValidRatio
+                    && $0.yawDegrees == candidate.yawDegrees
+                    && $0.rollDegrees == candidate.rollDegrees
+                    && $0.mouthOpenRatio == candidate.mouthOpenRatio
+                    && $0.landmarkRMS == candidate.landmarkRMS
+                })
             }
             selected.append(contentsOf: remaining.prefix(total - selected.count))
         }
