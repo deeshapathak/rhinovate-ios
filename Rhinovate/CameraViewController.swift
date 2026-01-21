@@ -490,13 +490,13 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
 
         setCaptureButton(title: "Scanning...", isEnabled: false)
-        scanDuration = 7.0
+        scanDuration = 15.0  // Longer scan for better coverage
         scanStartTime = Date()
         startGuidanceTimer()
         
         // Collect frames with RGB images for Gemini
         collectMultiFramePLYWithImages(duration: scanDuration,
-                                       interval: 0.2,
+                                       interval: 0.4,  // Less frequent to reduce load
                                        strideStep: 4,
                                        maxPoints: 500_000) { result in
             DispatchQueue.main.async {
@@ -908,15 +908,15 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         let segment = total / 5.0
         switch elapsed {
         case 0..<segment:
-            return "Hold steady: face front"
+            return "Face forward, hold still"
         case segment..<(2 * segment):
-            return "Slowly turn left ~30°"
+            return "Slowly turn your head left"
         case (2 * segment)..<(3 * segment):
-            return "Return to center"
+            return "Slowly turn your head right"
         case (3 * segment)..<(4 * segment):
-            return "Slowly turn right ~30°"
+            return "Look up slightly"
         default:
-            return "Return to center and hold"
+            return "Look down slightly, then return to center"
         }
     }
 
@@ -924,15 +924,15 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         let segment = total / 5.0
         switch elapsed {
         case 0..<segment:
-            return "⬆︎ Face front"
+            return "⬆︎ Face forward"
         case segment..<(2 * segment):
-            return "⬅︎ Turn left ~30°"
+            return "⬅︎ Turn left"
         case (2 * segment)..<(3 * segment):
-            return "⬆︎ Return to center"
+            return "➡︎ Turn right"
         case (3 * segment)..<(4 * segment):
-            return "➡︎ Turn right ~30°"
+            return "⬆︎ Look up"
         default:
-            return "⬆︎ Return to center"
+            return "⬇︎ Look down"
         }
     }
 
@@ -2037,27 +2037,46 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                         colorBuffer = self.latestColorBuffer
                     }
                     
-                    if let depthData, let colorBuffer {
-                        // Convert to JPEG immediately to avoid pixel buffer retention issues
-                        if let jpegData = self.convertPixelBufferToJPEG(colorBuffer, quality: 0.85) {
+                    // Capture RGB frame for Gemini (less frequently to avoid freezing)
+                    // Only capture every 3rd candidate to reduce processing load
+                    if candidates.count % 3 == 0 && rgbFrames.count < 30 {
+                        var depthData: AVDepthData?
+                        var colorBuffer: CVPixelBuffer?
+                        self.latestFrameQueue.sync {
+                            depthData = self.latestDepthData
+                            colorBuffer = self.latestColorBuffer
+                        }
                         
-                        let analysis = self.analyzeFace(in: colorBuffer)
-                        let landmarks = analysis?.landmarks ?? []
-                        
-                        // Determine pose type from angles
-                        let pose = self.determinePoseFromAngles(yaw: analysis?.yawDegrees, pitch: analysis?.pitchDegrees)
-                        
-                            let frame = CapturedFrame(
-                                pose: pose,
-                                rgbImageJPEG: jpegData,
-                                depthData: depthData,
-                                timestamp: Date(),
-                                yaw: analysis?.yawDegrees,
-                                pitch: analysis?.pitchDegrees,
-                                roll: analysis?.rollDegrees,
-                                landmarks: landmarks
-                            )
-                            rgbFrames.append(frame)
+                        if let depthData, let colorBuffer {
+                            // Convert to JPEG on background thread to avoid UI freezing
+                            let colorBufferCopy = colorBuffer
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                guard let jpegData = self.convertPixelBufferToJPEG(colorBufferCopy, quality: 0.8) else {
+                                    return
+                                }
+                                
+                                let analysis = self.analyzeFace(in: colorBufferCopy)
+                                let landmarks = analysis?.landmarks ?? []
+                                
+                                // Determine pose type from angles
+                                let pose = self.determinePoseFromAngles(yaw: analysis?.yawDegrees, pitch: analysis?.pitchDegrees)
+                                
+                                let frame = CapturedFrame(
+                                    pose: pose,
+                                    rgbImageJPEG: jpegData,
+                                    depthData: depthData,
+                                    timestamp: Date(),
+                                    yaw: analysis?.yawDegrees,
+                                    pitch: analysis?.pitchDegrees,
+                                    roll: analysis?.rollDegrees,
+                                    landmarks: landmarks
+                                )
+                                
+                                // Append thread-safely on processing queue
+                                self.processingQueue.async {
+                                    rgbFrames.append(frame)
+                                }
+                            }
                         }
                     }
                     
