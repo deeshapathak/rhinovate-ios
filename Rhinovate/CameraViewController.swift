@@ -488,7 +488,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         }
 
         setCaptureButton(title: "Scanning...", isEnabled: false)
-        scanDuration = 35.0  // Longer scan to ensure all poses (front, left, right, up, down) are captured
+        scanDuration = 20.0  // Scan for front, left, right poses only
         scanStartTime = Date()
         startGuidanceTimer()
         
