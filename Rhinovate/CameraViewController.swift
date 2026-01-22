@@ -2036,10 +2036,10 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                         case .up: return "up"
                         }
                     }.joined(separator: ", ")
-                    print("📸 Captured poses: \(poseNames) (\(selectedFrames.count)/5)")
+                    print("📸 Captured poses: \(poseNames) (\(selectedFrames.count)/3)")
                     
-                    // Warn if missing poses
-                    let allPoses: Set<CapturePose> = [.front, .left, .right, .down, .up]
+                    // Warn if missing poses (only front, left, right needed)
+                    let allPoses: Set<CapturePose> = [.front, .left, .right]
                     let capturedPoseSet = Set(capturedPoses)
                     let missingPoses = allPoses.subtracting(capturedPoseSet)
                     if !missingPoses.isEmpty {
@@ -2185,19 +2185,13 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     }
     
     private func determinePoseFromAngles(yaw: Float?, pitch: Float?) -> CapturePose {
-        guard let yaw = yaw, let pitch = pitch else {
+        guard let yaw = yaw else {
             return .front
         }
         
-        // Determine pose based on angles
+        // Determine pose based on yaw only (no up/down poses)
         if abs(yaw) < 15 {
-            if pitch < -20 {
-                return .down
-            } else if pitch > 20 {
-                return .up
-            } else {
-                return .front
-            }
+            return .front
         } else if yaw < -70 {
             return .left
         } else if yaw > 70 {
