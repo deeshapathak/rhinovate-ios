@@ -2115,7 +2115,15 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 
                 // Log which poses were captured
                 let capturedPoses = selectedFrames.map { $0.pose }
-                let poseNames = capturedPoses.map { $0.shortName }.joined(separator: ", ")
+                let poseNames = capturedPoses.map { pose in
+                    switch pose {
+                    case .front: return "front"
+                    case .left: return "left"
+                    case .right: return "right"
+                    case .down: return "down"
+                    case .up: return "up"
+                    }
+                }.joined(separator: ", ")
                 print("📸 Captured poses: \(poseNames) (\(selectedFrames.count)/5)")
                 
                 // Warn if missing poses
@@ -2123,7 +2131,15 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 let capturedPoseSet = Set(capturedPoses)
                 let missingPoses = allPoses.subtracting(capturedPoseSet)
                 if !missingPoses.isEmpty {
-                    let missingNames = missingPoses.map { $0.shortName }.joined(separator: ", ")
+                    let missingNames = missingPoses.map { pose in
+                        switch pose {
+                        case .front: return "front"
+                        case .left: return "left"
+                        case .right: return "right"
+                        case .down: return "down"
+                        case .up: return "up"
+                        }
+                    }.joined(separator: ", ")
                     print("⚠️ Missing poses: \(missingNames)")
                 }
 
