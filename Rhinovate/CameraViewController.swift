@@ -367,7 +367,6 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         
         setupCaptureButton()
         setupGuidanceOverlay()
-        setupTrueDepthHealthOverlay()
         hapticGenerator = UIImpactFeedbackGenerator(style: .light)
         
         JETEnabled = false
@@ -812,97 +811,6 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         directionLabel = label
     }
 
-    private func setupTrueDepthHealthOverlay() {
-        if trueDepthStatusLabel != nil {
-            return
-        }
-
-        let label = UILabel()
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.backgroundColor = UIColor.systemRed.withAlphaComponent(0.85)
-        label.textColor = .white
-        label.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
-        label.numberOfLines = 0
-        label.textAlignment = .center
-        label.layer.cornerRadius = 8
-        label.layer.masksToBounds = true
-        label.isHidden = true
-
-        view.addSubview(label)
-
-        let topAnchor = guidanceContainer?.bottomAnchor ?? view.safeAreaLayoutGuide.topAnchor
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-        ])
-
-        trueDepthStatusLabel = label
-    }
-
-    private func startDepthHealthTimer() {
-        depthHealthTimer?.invalidate()
-        depthHealthStartAt = Date()
-        depthHealthTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateDepthHealth()
-        }
-    }
-
-    private func stopDepthHealthTimer() {
-        depthHealthTimer?.invalidate()
-        depthHealthTimer = nil
-        depthHealthStartAt = nil
-        hasSeenDepthFrame = false
-    }
-
-    private func updateDepthHealth() {
-        let now = Date()
-        if let start = depthHealthStartAt, now.timeIntervalSince(start) < 3.0 {
-            hideTrueDepthStatus()
-            return
-        }
-
-        if !hasSeenDepthFrame {
-            if let start = depthHealthStartAt, now.timeIntervalSince(start) < 5.0 {
-                hideTrueDepthStatus()
-                return
-            }
-            showTrueDepthStatus(message: "TrueDepth inactive: no depth frames received yet.")
-            return
-        }
-
-        let ageSeconds = lastDepthFrameAt.map { now.timeIntervalSince($0) } ?? Double.greatestFiniteMagnitude
-        let stale = ageSeconds > 3.0
-        let noDepth = lastDepthPixelCount == 0 || lastValidDepthCount == 0
-        let depthTooLow = depthLowStreak >= 15
-        let ratio = lastDepthPixelCount > 0 ? Float(lastValidDepthCount) / Float(lastDepthPixelCount) : 0
-        let ratioPercent = Int(ratio * 100)
-
-        if !session.isRunning {
-            showTrueDepthStatus(message: "TrueDepth inactive: capture session stopped.")
-            return
-        }
-
-        if stale || noDepth || depthTooLow {
-            let ageText = ageSeconds.isFinite ? String(format: "%.1fs", ageSeconds) : "--"
-            showTrueDepthStatus(message: "TrueDepth inactive (age \(ageText), depth \(ratioPercent)%). Close other camera apps, restart the app, and ensure good lighting.")
-        } else {
-            hideTrueDepthStatus()
-        }
-    }
-
-    private func showTrueDepthStatus(message: String) {
-        DispatchQueue.main.async {
-            self.trueDepthStatusLabel?.text = message
-            self.trueDepthStatusLabel?.isHidden = false
-        }
-    }
-
-    private func hideTrueDepthStatus() {
-        DispatchQueue.main.async {
-            self.trueDepthStatusLabel?.isHidden = true
-        }
-    }
 
     private func startGuidanceTimer() {
         scanTimer?.invalidate()
@@ -1216,7 +1124,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private func failConfiguration(_ message: String) {
         print("Session configuration failed: \(message)")
         setSetupResult(.configurationFailed)
-        showTrueDepthStatus(message: message)
+        // TrueDepth warning removed
     }
     
     override func viewWillAppear(_ animated: Bool) {
@@ -1275,11 +1183,11 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 }
             }
         }
-        startDepthHealthTimer()
+        // TrueDepth health timer removed
     }
     
     override func viewWillDisappear(_ animated: Bool) {
-        stopDepthHealthTimer()
+        // TrueDepth health timer removed
         dataOutputQueue.async {
             self.renderingEnabled = false
         }
