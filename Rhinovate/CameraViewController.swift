@@ -2057,7 +2057,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 
                     // Update UI immediately
                     DispatchQueue.main.async {
-                        let poseInfo = selectedFrames.count == 5 ? "✅ All poses captured" : "⚠️ \(selectedFrames.count)/5 poses"
+                        let poseInfo = selectedFrames.count >= 3 ? "✅ All poses captured" : "⚠️ \(selectedFrames.count)/3 poses"
                         self.guidanceDetailLabel?.text = "Building 3D model... \(poseInfo)"
                     }
                     // Build points array on background thread
