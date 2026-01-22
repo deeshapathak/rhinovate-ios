@@ -2143,33 +2143,51 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                     print("⚠️ Missing poses: \(missingNames)")
                 }
 
-                var points: [String] = []
-                for candidate in scored.prefix(20) {  // Use top 20 candidates for PLY
-                    for point in candidate.points {
-                        if points.count >= maxPoints {
-                            break
-                        }
-                        points.append(point)
-                    }
-                }
-
-                guard points.count >= 1000 else {
-                    completion(.failure(CaptureError.sparsePoints(points.count)))
-                    return
-                }
-                
-                // Update UI to show processing with pose info
+                // Update UI immediately
                 DispatchQueue.main.async {
                     let poseInfo = selectedFrames.count == 5 ? "✅ All poses captured" : "⚠️ \(selectedFrames.count)/5 poses"
                     self.guidanceDetailLabel?.text = "Building 3D model... \(poseInfo)"
                 }
                 
-                // Build PLY on background thread to prevent UI freeze
+                // Move ALL heavy work to background thread to prevent UI freeze
                 DispatchQueue.global(qos: .userInitiated).async {
+                    // Build points array on background thread
+                    var points: [String] = []
+                    points.reserveCapacity(min(maxPoints, scored.prefix(20).reduce(0) { $0 + $1.points.count }))
+                    
+                    for candidate in scored.prefix(20) {  // Use top 20 candidates for PLY
+                        for point in candidate.points {
+                            if points.count >= maxPoints {
+                                break
+                            }
+                            points.append(point)
+                        }
+                        if points.count >= maxPoints {
+                            break
+                        }
+                    }
+
+                    guard points.count >= 1000 else {
+                        DispatchQueue.main.async {
+                            completion(.failure(CaptureError.sparsePoints(points.count)))
+                        }
+                        return
+                    }
+                    
+                    // Update UI with point count
+                    DispatchQueue.main.async {
+                        self.guidanceDetailLabel?.text = "Building 3D model from \(points.count) points..."
+                    }
+                    
+                    // Build PLY data
                     if let plyData = self.buildPLYData(from: points) {
-                        completion(.success((plyData, selectedFrames)))
+                        DispatchQueue.main.async {
+                            completion(.success((plyData, selectedFrames)))
+                        }
                     } else {
-                        completion(.failure(CaptureError.insufficientPoints))
+                        DispatchQueue.main.async {
+                            completion(.failure(CaptureError.insufficientPoints))
+                        }
                     }
                 }
             }
