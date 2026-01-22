@@ -280,7 +280,6 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
     private var faceFrameView: UIView?
     private var faceFrameLabel: UILabel?
     private var hapticGenerator: UIImpactFeedbackGenerator?
-    private var trueDepthStatusLabel: UILabel?
     private var depthHealthTimer: Timer?
     private var lastDepthFrameAt: Date?
     private var depthHealthStartAt: Date?
@@ -1614,7 +1613,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         
         let error = AVError(_nsError: errorValue)
         print("Capture session runtime error: \(error)")
-        showTrueDepthStatus(message: "Camera service error. Close other camera apps and relaunch Rhinovate.")
+        // TrueDepth warning removed
         
         /*
          Automatically try to restart the session running if media services were
