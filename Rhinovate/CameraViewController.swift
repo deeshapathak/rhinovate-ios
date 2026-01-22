@@ -500,9 +500,18 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                                        strideStep: 4,
                                        maxPoints: 500_000) { result in
             DispatchQueue.main.async {
-                self.stopGuidanceTimer()
                 // Show completion animation
                 self.showScanCompleteAnimation()
+                
+                // Update UI based on result
+                switch result {
+                case .success:
+                    self.guidanceTitleLabel?.text = "✨ Uploading..."
+                    self.guidanceDetailLabel?.text = "Sending scan to server"
+                case .failure(let error):
+                    self.guidanceTitleLabel?.text = "❌ Scan Failed"
+                    self.guidanceDetailLabel?.text = error.localizedDescription
+                }
             }
             switch result {
             case .success(let (plyData, frames)):
@@ -2065,6 +2074,15 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             let endTime = Date().addingTimeInterval(duration)
 
             func finalize() {
+                // Stop guidance timer immediately when scan window ends
+                DispatchQueue.main.async {
+                    self.stopGuidanceTimer()
+                    self.guidanceTitleLabel?.text = "✨ Processing..."
+                    self.guidanceDetailLabel?.text = "Preparing your 3D scan"
+                    self.guidanceProgress?.progress = 1.0
+                    self.directionLabel?.text = "⏳ Please wait"
+                }
+                
                 guard !candidates.isEmpty else {
                     completion(.failure(CaptureError.noFrames))
                     return
@@ -2102,6 +2120,11 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 guard points.count >= 1000 else {
                     completion(.failure(CaptureError.sparsePoints(points.count)))
                     return
+                }
+                
+                // Update UI to show processing
+                DispatchQueue.main.async {
+                    self.guidanceDetailLabel?.text = "Building 3D model from \(points.count) points..."
                 }
                 
                 // Build PLY on background thread to prevent UI freeze
