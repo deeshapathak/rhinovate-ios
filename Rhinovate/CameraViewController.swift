@@ -2022,7 +2022,7 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                         self.scoreCandidate(a) > self.scoreCandidate(b)
                     }
 
-                    // Select best frames for 5 poses automatically
+                    // Select best frames for 3 poses automatically (front, left, right only)
                     let selectedFrames = self.selectBestFramesForPoses(scored: scored, rgbFrames: rgbFrames)
                     
                     // Log which poses were captured
@@ -2221,9 +2221,9 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             }
         }
         
-        // Return in order: front, left, right, down, up
+        // Return in order: front, left, right (only 3 poses)
         var result: [CapturedFrame] = []
-        for pose in [CapturePose.front, .left, .right, .down, .up] {
+        for pose in [CapturePose.front, .left, .right] {
             if let frame = selected[pose] {
                 result.append(frame)
             }
@@ -2836,10 +2836,12 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
         body.append(data)
         body.append("\r\n".data(using: .utf8)!)
         
-        // Add RGB frames as JPEG images (already converted to JPEG)
-        let frameNames: [CapturePose: String] = [.front: "front", .left: "left", .right: "right", .down: "down", .up: "up"]
+        // Add RGB frames as JPEG images (only front, left, right - no up/down)
+        let frameNames: [CapturePose: String] = [.front: "front", .left: "left", .right: "right"]
         for frame in frames {
-            guard let fieldName = frameNames[frame.pose] else {
+            // Only send front, left, right - skip up and down
+            guard [.front, .left, .right].contains(frame.pose),
+                  let fieldName = frameNames[frame.pose] else {
                 continue
             }
             
