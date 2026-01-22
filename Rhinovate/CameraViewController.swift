@@ -2112,6 +2112,20 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
 
                 // Select best frames for 5 poses automatically
                 let selectedFrames = self.selectBestFramesForPoses(scored: scored, rgbFrames: rgbFrames)
+                
+                // Log which poses were captured
+                let capturedPoses = selectedFrames.map { $0.pose }
+                let poseNames = capturedPoses.map { $0.shortName }.joined(separator: ", ")
+                print("📸 Captured poses: \(poseNames) (\(selectedFrames.count)/5)")
+                
+                // Warn if missing poses
+                let allPoses: Set<CapturePose> = [.front, .left, .right, .down, .up]
+                let capturedPoseSet = Set(capturedPoses)
+                let missingPoses = allPoses.subtracting(capturedPoseSet)
+                if !missingPoses.isEmpty {
+                    let missingNames = missingPoses.map { $0.shortName }.joined(separator: ", ")
+                    print("⚠️ Missing poses: \(missingNames)")
+                }
 
                 var points: [String] = []
                 for candidate in scored.prefix(20) {  // Use top 20 candidates for PLY
@@ -2128,9 +2142,10 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                     return
                 }
                 
-                // Update UI to show processing
+                // Update UI to show processing with pose info
                 DispatchQueue.main.async {
-                    self.guidanceDetailLabel?.text = "Building 3D model from \(points.count) points..."
+                    let poseInfo = selectedFrames.count == 5 ? "✅ All poses captured" : "⚠️ \(selectedFrames.count)/5 poses"
+                    self.guidanceDetailLabel?.text = "Building 3D model... \(poseInfo)"
                 }
                 
                 // Build PLY on background thread to prevent UI freeze
