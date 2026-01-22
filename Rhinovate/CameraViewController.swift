@@ -976,7 +976,13 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
             return
         }
         let elapsed = Date().timeIntervalSince(scanStartTime)
-        let progress = min(Float(elapsed / scanDuration), 1.0)
+        
+        // Don't update if scan window has ended (finalize() handles that)
+        guard elapsed < scanDuration else {
+            return
+        }
+        
+        let progress = min(Float(elapsed / scanDuration), 0.99) // Cap at 99% until finalize
         guidanceProgress?.progress = progress
 
         let cue = scanCueText(elapsed: elapsed, total: scanDuration)
