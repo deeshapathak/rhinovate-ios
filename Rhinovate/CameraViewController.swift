@@ -2090,48 +2090,37 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                 }
                 
                 guard !candidates.isEmpty else {
-                    completion(.failure(CaptureError.noFrames))
+                    DispatchQueue.main.async {
+                        completion(.failure(CaptureError.noFrames))
+                    }
                     return
                 }
 
-                let filtered = candidates.filter { candidate in
-                    let validOk = candidate.depthValidRatio >= 0.08 && candidate.pointCount >= 5000
-                    let rollOk = candidate.rollDegrees.map { abs($0) < 15.0 } ?? true
-                    let yawOk = candidate.yawDegrees.map { abs($0) < 35.0 } ?? true
-                    let mouthOk = candidate.mouthOpenRatio.map { $0 < 0.06 } ?? true
-                    let lmkOk = candidate.landmarkRMS.map { $0 < 0.02 } ?? true
-                    let deltaPoseOk = candidate.deltaPose.map { $0 < 6.0 } ?? true
-                    let deltaCentroidOk = candidate.deltaCentroid.map { $0 < 0.01 } ?? true
-                    return validOk && rollOk && yawOk && mouthOk && lmkOk && deltaPoseOk && deltaCentroidOk
-                }
-
-                let pool = filtered.isEmpty ? candidates : filtered
-                let scored = pool.sorted { a, b in
-                    self.scoreCandidate(a) > self.scoreCandidate(b)
-                }
-
-                // Select best frames for 5 poses automatically
-                let selectedFrames = self.selectBestFramesForPoses(scored: scored, rgbFrames: rgbFrames)
-                
-                // Log which poses were captured
-                let capturedPoses = selectedFrames.map { $0.pose }
-                let poseNames = capturedPoses.map { pose in
-                    switch pose {
-                    case .front: return "front"
-                    case .left: return "left"
-                    case .right: return "right"
-                    case .down: return "down"
-                    case .up: return "up"
+                // Move ALL heavy processing to background thread immediately
+                // This prevents blocking the processing queue which could cause UI freeze
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let filtered = candidates.filter { candidate in
+                        let validOk = candidate.depthValidRatio >= 0.08 && candidate.pointCount >= 5000
+                        let rollOk = candidate.rollDegrees.map { abs($0) < 15.0 } ?? true
+                        let yawOk = candidate.yawDegrees.map { abs($0) < 35.0 } ?? true
+                        let mouthOk = candidate.mouthOpenRatio.map { $0 < 0.06 } ?? true
+                        let lmkOk = candidate.landmarkRMS.map { $0 < 0.02 } ?? true
+                        let deltaPoseOk = candidate.deltaPose.map { $0 < 6.0 } ?? true
+                        let deltaCentroidOk = candidate.deltaCentroid.map { $0 < 0.01 } ?? true
+                        return validOk && rollOk && yawOk && mouthOk && lmkOk && deltaPoseOk && deltaCentroidOk
                     }
-                }.joined(separator: ", ")
-                print("📸 Captured poses: \(poseNames) (\(selectedFrames.count)/5)")
-                
-                // Warn if missing poses
-                let allPoses: Set<CapturePose> = [.front, .left, .right, .down, .up]
-                let capturedPoseSet = Set(capturedPoses)
-                let missingPoses = allPoses.subtracting(capturedPoseSet)
-                if !missingPoses.isEmpty {
-                    let missingNames = missingPoses.map { pose in
+
+                    let pool = filtered.isEmpty ? candidates : filtered
+                    let scored = pool.sorted { a, b in
+                        self.scoreCandidate(a) > self.scoreCandidate(b)
+                    }
+
+                    // Select best frames for 5 poses automatically
+                    let selectedFrames = self.selectBestFramesForPoses(scored: scored, rgbFrames: rgbFrames)
+                    
+                    // Log which poses were captured
+                    let capturedPoses = selectedFrames.map { $0.pose }
+                    let poseNames = capturedPoses.map { pose in
                         switch pose {
                         case .front: return "front"
                         case .left: return "left"
@@ -2140,17 +2129,30 @@ class CameraViewController: UIViewController, AVCaptureDataOutputSynchronizerDel
                         case .up: return "up"
                         }
                     }.joined(separator: ", ")
-                    print("⚠️ Missing poses: \(missingNames)")
-                }
+                    print("📸 Captured poses: \(poseNames) (\(selectedFrames.count)/5)")
+                    
+                    // Warn if missing poses
+                    let allPoses: Set<CapturePose> = [.front, .left, .right, .down, .up]
+                    let capturedPoseSet = Set(capturedPoses)
+                    let missingPoses = allPoses.subtracting(capturedPoseSet)
+                    if !missingPoses.isEmpty {
+                        let missingNames = missingPoses.map { pose in
+                            switch pose {
+                            case .front: return "front"
+                            case .left: return "left"
+                            case .right: return "right"
+                            case .down: return "down"
+                            case .up: return "up"
+                            }
+                        }.joined(separator: ", ")
+                        print("⚠️ Missing poses: \(missingNames)")
+                    }
 
-                // Update UI immediately
-                DispatchQueue.main.async {
-                    let poseInfo = selectedFrames.count == 5 ? "✅ All poses captured" : "⚠️ \(selectedFrames.count)/5 poses"
-                    self.guidanceDetailLabel?.text = "Building 3D model... \(poseInfo)"
-                }
-                
-                // Move ALL heavy work to background thread to prevent UI freeze
-                DispatchQueue.global(qos: .userInitiated).async {
+                    // Update UI immediately
+                    DispatchQueue.main.async {
+                        let poseInfo = selectedFrames.count == 5 ? "✅ All poses captured" : "⚠️ \(selectedFrames.count)/5 poses"
+                        self.guidanceDetailLabel?.text = "Building 3D model... \(poseInfo)"
+                    }
                     // Build points array on background thread
                     var points: [String] = []
                     points.reserveCapacity(min(maxPoints, scored.prefix(20).reduce(0) { $0 + $1.points.count }))
